@@ -96,12 +96,18 @@ public class TblColRef implements Serializable {
 
     // for test mainly
     public static TblColRef mockup(TableDesc table, int oneBasedColumnIndex, String name, String datatype) {
+        return mockup(table, oneBasedColumnIndex, name, datatype, null);
+    }
+
+    // for test mainly
+    public static TblColRef mockup(TableDesc table, int oneBasedColumnIndex, String name, String datatype, String comment) {
         ColumnDesc desc = new ColumnDesc();
         String id = "" + oneBasedColumnIndex;
         desc.setId(id);
         desc.setName(name);
         desc.setDatatype(datatype);
         desc.init(table);
+        desc.setComment(comment);
         return new TblColRef(desc);
     }
 
@@ -129,13 +135,13 @@ public class TblColRef implements Serializable {
         this.identity = null;
     }
 
+    public ColumnDesc getColumnDesc() {
+        return column;
+    }
+
     public void unfixTableRef() {
         this.table = backupTable;
         this.identity = null;
-    }
-
-    public ColumnDesc getColumnDesc() {
-        return column;
     }
 
     public String getName() {
@@ -155,7 +161,7 @@ public class TblColRef implements Serializable {
     }
 
     public String getExpressionInSourceDB() {
-        if (!column.isComputedColumnn()) {
+        if (!column.isComputedColumn()) {
             return getIdentity();
         } else {
             return column.getComputedColumnExpr();
@@ -181,6 +187,9 @@ public class TblColRef implements Serializable {
         return column.getType();
     }
 
+    public String getBackupTableAlias(){
+        return backupTable.getAlias();
+    }
     private void markInnerColumn(InnerDataTypeEnum dataType) {
         this.column.setDatatype(dataType.getDataType());
         this.column.getTable().setName(INNER_TABLE_NAME);

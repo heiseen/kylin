@@ -107,11 +107,34 @@ KylinApp
       });
     };
 
+    $scope.openReloadModal = function () {
+      $modal.open({
+        templateUrl: 'reloadTable.html',
+        controller: ModalInstanceCtrl,
+        backdrop : 'static',
+        resolve: {
+          tableNames: function () {
+            return $scope.tableModel.selectedSrcTable.database + '.'+ $scope.tableModel.selectedSrcTable.name;
+          },
+          projectName: function () {
+            return $scope.projectModel.selectedProject;
+          },
+          isCalculate: function () {
+            return $scope.isCalculate;
+          },
+          scope: function () {
+            return $scope;
+          }
+        }
+      });
+    };
+
     $scope.openTreeModal = function () {
       if(!$scope.projectModel.selectedProject){
         SweetAlert.swal('Oops...', "Please select a project.", 'info');
         return;
       }
+
       $modal.open({
         templateUrl: 'addHiveTableFromTree.html',
         controller: ModalInstanceCtrl,
@@ -132,10 +155,10 @@ KylinApp
       });
     };
 
-    $scope.reloadTable = function (tableName){
+    $scope.reloadTable = function (tableName, isCalculate){
       var delay = $q.defer();
       loadingRequest.show();
-      TableService.loadHiveTable({tableName: tableName, action: $scope.projectModel.selectedProject}, {calculate: $scope.isCalculate}, function (result) {
+      TableService.loadHiveTable({tableName: tableName, action: $scope.projectModel.selectedProject}, {calculate: isCalculate}, function (result) {
         var loadTableInfo = "";
         angular.forEach(result['result.loaded'], function (table) {
           loadTableInfo += "\n" + table;
@@ -167,7 +190,6 @@ KylinApp
       })
        return delay.promise;
     }
-
 
 
     $scope.unloadTable = function (tableName) {
@@ -222,8 +244,11 @@ KylinApp
 
     var ModalInstanceCtrl = function ($scope, $location, $modalInstance, tableNames, MessageService, projectName, isCalculate, scope, kylinConfig) {
       $scope.tableNames = "";
+      $scope.selectTable = tableNames;
       $scope.projectName = projectName;
-      $scope.isCalculate = isCalculate;
+      $scope.isCalculate = {
+        val: true
+      }
 
       $scope.cancel = function () {
         $modalInstance.dismiss('cancel');
@@ -387,7 +412,11 @@ KylinApp
         $scope.loadHive();
       }
 
-
+      $scope.confirmReload = function() {
+        scope.reloadTable($scope.selectTable, $scope.isCalculate.val).then(function() {
+          $scope.cancel();
+        })
+      }
 
 
       $scope.add = function () {
@@ -411,7 +440,7 @@ KylinApp
         }
 
         $scope.cancel();
-        scope.reloadTable($scope.tableNames).then(function(){
+        scope.reloadTable($scope.tableNames, $scope.isCalculate.val).then(function(){
              scope.aceSrcTbLoaded(true);
            });
       }
@@ -654,14 +683,15 @@ KylinApp
 
         //streaming table data change structure
         var columnList=[]
-        function changeObjTree(obj,base){
+        function changeObjTree(obj,base,comment){
           base=base?base+"_":"";
+          comment= comment?comment+"|":""
           for(var i in obj){
             if(Object.prototype.toString.call(obj[i])=="[object Object]"){
-              changeObjTree(obj[i],base+i);
+              changeObjTree(obj[i],base+i,comment+i);
               continue;
             }
-            columnList.push(createNewObj(base+i,obj[i]));
+            columnList.push(createNewObj(base+i,obj[i],comment+i));
           }
         }
 
@@ -693,12 +723,13 @@ KylinApp
           return defaultType;
         }
 
-        function createNewObj(key,val){
+        function createNewObj(key,val,comment){
           var obj={};
           obj.name=key;
           obj.type=checkValType(val,key);
           obj.fromSource="Y";
           obj.checked="Y";
+          obj.comment=comment;
           if(Object.prototype.toString.call(val)=="[object Array]"){
             obj.checked="N";
           }
@@ -769,6 +800,7 @@ KylinApp
             var columnInstance = {
               "id": ++$index,
               "name": column.name,
+              "comment": /[|]/.test(column.comment)? column.comment : "",
               "datatype": column.type
             }
             columns.push(columnInstance);

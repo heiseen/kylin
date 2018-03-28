@@ -19,6 +19,7 @@
 package org.apache.kylin.storage.hbase.steps;
 
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -66,7 +67,7 @@ public class HBaseMROutput2Transition implements IMROutput2 {
 
             @Override
             public void addStepPhase2_BuildDictionary(DefaultChainedExecutable jobFlow) {
-                jobFlow.addTask(steps.createCreateHTableStepWithStats(jobFlow.getId()));
+                jobFlow.addTask(steps.createCreateHTableStep(jobFlow.getId()));
             }
 
             @Override
@@ -99,6 +100,14 @@ public class HBaseMROutput2Transition implements IMROutput2 {
                 int level) throws Exception {
             int reducerNum = 1;
             Class mapperClass = job.getMapperClass();
+
+            //allow user specially set config for base cuboid step
+            if (mapperClass == HiveToBaseCuboidMapper.class) {
+                for (Map.Entry<String, String> entry : segment.getConfig().getBaseCuboidMRConfigOverride().entrySet()) {
+                    job.getConfiguration().set(entry.getKey(), entry.getValue());
+                }
+            }
+
             if (mapperClass == HiveToBaseCuboidMapper.class || mapperClass == NDCuboidMapper.class) {
                 reducerNum = MapReduceUtil.getLayeredCubingReduceTaskNum(segment, cuboidScheduler,
                         AbstractHadoopJob.getTotalMapInputMB(job), level);
@@ -120,7 +129,7 @@ public class HBaseMROutput2Transition implements IMROutput2 {
 
             @Override
             public void addStepPhase1_MergeDictionary(DefaultChainedExecutable jobFlow) {
-                jobFlow.addTask(steps.createCreateHTableStepWithStats(jobFlow.getId()));
+                jobFlow.addTask(steps.createCreateHTableStep(jobFlow.getId()));
             }
 
             @Override
@@ -197,7 +206,7 @@ public class HBaseMROutput2Transition implements IMROutput2 {
 
             @Override
             public void addStepPhase2_CreateHTable(DefaultChainedExecutable jobFlow) {
-                jobFlow.addTask(steps.createCreateHTableStepWithStats(jobFlow.getId(), CuboidModeEnum.RECOMMEND));
+                jobFlow.addTask(steps.createCreateHTableStep(jobFlow.getId(), CuboidModeEnum.RECOMMEND));
             }
 
             @Override

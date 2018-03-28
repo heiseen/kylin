@@ -24,14 +24,18 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Matcher;
 
 import org.apache.commons.lang.StringUtils;
-import org.apache.commons.lang3.tuple.Pair;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.MailService;
+import org.apache.kylin.common.util.Pair;
+import org.apache.kylin.common.util.StringUtil;
 import org.apache.kylin.job.exception.ExecuteException;
 import org.apache.kylin.job.exception.PersistentException;
 import org.apache.kylin.job.impl.threadpool.DefaultContext;
+import org.apache.kylin.job.util.MailNotificationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,16 +67,16 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
     public AbstractExecutable() {
         setId(UUID.randomUUID().toString());
     }
-    
+
     protected void initConfig(KylinConfig config) {
         Preconditions.checkState(this.config == null || this.config == config);
         this.config = config;
     }
-    
+
     protected KylinConfig getConfig() {
         return config;
     }
-    
+
     protected ExecutableManager getManager() {
         return ExecutableManager.getInstance(config);
     }
@@ -81,6 +85,36 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
         Map<String, String> info = Maps.newHashMap();
         info.put(START_TIME, Long.toString(System.currentTimeMillis()));
         getManager().updateJobOutput(getId(), ExecutableState.RUNNING, info, null);
+    }
+
+    private void onExecuteFinishedWithRetry(ExecuteResult result, ExecutableContext executableContext)
+            throws ExecuteException {
+        Throwable exception;
+        int nRetry = 0;
+        do {
+            nRetry++;
+            exception = null;
+            try {
+                onExecuteFinished(result, executableContext);
+            } catch (Exception e) {
+                logger.error(nRetry + "th retries for onExecuteFinished fails due to {}", e);
+                if (isMetaDataPersistException(e)) {
+                    exception = e;
+                    try {
+                        Thread.sleep(1000L * (long) Math.pow(4, nRetry));
+                    } catch (InterruptedException exp) {
+                        throw new RuntimeException(exp);
+                    }
+                } else {
+                    throw e;
+                }
+            }
+        } while (exception != null && nRetry <= executableContext.getConfig().getJobMetadataPersistRetry());
+
+        if (exception != null) {
+            handleMetadataPersistException(executableContext, exception);
+            throw new ExecuteException(exception);
+        }
     }
 
     protected void onExecuteFinished(ExecuteResult result, ExecutableContext executableContext) {
@@ -114,6 +148,7 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
 
         Preconditions.checkArgument(executableContext instanceof DefaultContext);
         ExecuteResult result = null;
+
         try {
             onExecuteStart(executableContext);
             Throwable exception;
@@ -130,29 +165,43 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
                     exception = e;
                 }
                 retry++;
-            } while (((result != null && result.succeed() == false) || exception != null) && needRetry() == true);
+            } while (needRetry(this.retry, exception)); //exception in ExecuteResult should handle by user itself.
 
             if (exception != null) {
                 onExecuteError(exception, executableContext);
                 throw new ExecuteException(exception);
             }
 
-            onExecuteFinished(result, executableContext);
+            onExecuteFinishedWithRetry(result, executableContext);
+        } catch (ExecuteException e) {
+            throw e;
         } catch (Exception e) {
-            if (isMetaDataPersistException(e)) {
-                handleMetaDataPersistException(e);
-            }
-            if (e instanceof ExecuteException) {
-                throw e;
-            } else {
-                throw new ExecuteException(e);
-            }
+            throw new ExecuteException(e);
         }
         return result;
     }
 
-    protected void handleMetaDataPersistException(Exception e) {
-        // do nothing.
+    protected void handleMetadataPersistException(ExecutableContext context, Throwable exception) {
+        final String[] adminDls = context.getConfig().getAdminDls();
+        if (adminDls == null || adminDls.length < 1) {
+            logger.warn("no need to send email, user list is empty");
+            return;
+        }
+        List<String> users = Lists.newArrayList(adminDls);
+
+        Map<String, Object> dataMap = Maps.newHashMap();
+        dataMap.put("job_name", getName());
+        dataMap.put("env_name", context.getConfig().getDeployEnv());
+        dataMap.put("submitter", StringUtil.noBlank(getSubmitter(), "missing submitter"));
+        dataMap.put("job_engine", MailNotificationUtil.getLocalHostName());
+        dataMap.put("error_log",
+                Matcher.quoteReplacement(StringUtil.noBlank(exception.getMessage(), "no error message")));
+
+        String content = MailNotificationUtil.getMailContent(MailNotificationUtil.METADATA_PERSIST_FAIL, dataMap);
+        String title = MailNotificationUtil.getMailTitle("METADATA PERSIST", "FAIL",
+                context.getConfig().getDeployEnv());
+
+        new MailService(context.getConfig()).sendMail(users, title, content);
     }
 
     private boolean isMetaDataPersistException(Exception e) {
@@ -203,7 +252,7 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
     }
 
     @Override
-    public final ExecutableState getStatus() {
+    public ExecutableState getStatus() {
         ExecutableManager manager = getManager();
         return manager.getOutput(this.getId()).getState();
     }
@@ -289,7 +338,7 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
         logger.info("job name:" + getName());
         logger.info("submitter:" + getSubmitter());
         logger.info("notify list:" + users);
-        new MailService(kylinConfig).sendMail(users, email.getLeft(), email.getRight());
+        new MailService(kylinConfig).sendMail(users, email.getFirst(), email.getSecond());
     }
 
     protected void sendMail(Pair<String, String> email) {
@@ -325,7 +374,7 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
     public static long getEndTime(Output output) {
         return getExtraInfoAsLong(output, END_TIME, 0L);
     }
-    
+
     public static long getInterruptTime(Output output) {
         return getExtraInfoAsLong(output, INTERRUPT_TIME, 0L);
     }
@@ -412,12 +461,25 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
         return status == ExecutableState.STOPPED;
     }
 
-    protected boolean needRetry() {
-        return this.retry <= config.getJobRetry();
+    // Retry will happen in below cases:
+    // 1) if property "kylin.job.retry-exception-classes" is not set or is null, all jobs with exceptions will retry according to the retry times.
+    // 2) if property "kylin.job.retry-exception-classes" is set and is not null, only jobs with the specified exceptions will retry according to the retry times.
+    public static boolean needRetry(int retry, Throwable t) {
+        if (retry > KylinConfig.getInstanceFromEnv().getJobRetry() || t == null) {
+            return false;
+        } else {
+            return isRetryableException(t.getClass().getName());
+        }
+    }
+
+    private static boolean isRetryableException(String exceptionName) {
+        String[] jobRetryExceptions = KylinConfig.getInstanceFromEnv().getJobRetryExceptions();
+        return ArrayUtils.isEmpty(jobRetryExceptions) || ArrayUtils.contains(jobRetryExceptions, exceptionName);
     }
 
     @Override
     public String toString() {
-        return Objects.toStringHelper(this).add("id", getId()).add("name", getName()).add("state", getStatus()).toString();
+        return Objects.toStringHelper(this).add("id", getId()).add("name", getName()).add("state", getStatus())
+                .toString();
     }
 }

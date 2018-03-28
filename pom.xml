@@ -16,23 +16,21 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 -->
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
         <groupId>org.apache</groupId>
         <artifactId>apache</artifactId>
         <version>16</version>
-        <relativePath/>
+        <relativePath />
         <!-- no parent resolution -->
     </parent>
 
     <groupId>org.apache.kylin</groupId>
     <artifactId>kylin</artifactId>
     <packaging>pom</packaging>
-    <version>2.3.0-SNAPSHOT</version>
+    <version>2.4.0-SNAPSHOT</version>
 
     <name>Apache Kylin</name>
     <url>http://kylin.apache.org</url>
@@ -67,7 +65,7 @@
         <!-- <reflections.version>0.9.10</reflections.version> -->
 
         <!-- Calcite Version -->
-        <calcite.version>1.13.0-kylin-r3-SNAPSHOT</calcite.version>
+        <calcite.version>1.13.0-kylin-r4</calcite.version>
         <avatica.version>1.10.0</avatica.version>
 
         <!-- Hadoop Common deps, keep compatible with hadoop2.version -->
@@ -84,14 +82,14 @@
         <commons-collections.version>3.2.2</commons-collections.version>
 
         <!-- Calcite deps, keep compatible with calcite.version -->
-        <jackson.version>2.6.3</jackson.version>
+        <jackson.version>2.6.7.1</jackson.version>
 
         <!-- Test Dependency versions -->
         <antlr.version>3.4</antlr.version>
         <junit.version>4.12</junit.version>
         <mrunit.version>1.1.0</mrunit.version>
-        <dbunit.version>2.5.2</dbunit.version>
-        <h2.version>1.4.192</h2.version>
+        <dbunit.version>2.5.4</dbunit.version>
+        <h2.version>1.4.196</h2.version>
         <jetty.version>9.2.20.v20161216</jetty.version>
         <jamm.version>0.3.1</jamm.version>
         <mockito.version>2.7.14</mockito.version>
@@ -100,6 +98,7 @@
         <!-- Commons -->
         <commons-lang3.version>3.4</commons-lang3.version>
         <commons-email.version>1.5</commons-email.version>
+        <commons-validator.version>1.4.0</commons-validator.version>
 
         <!-- Utility -->
         <log4j.version>1.2.17</log4j.version>
@@ -112,8 +111,9 @@
         <cglib.version>3.2.4</cglib.version>
         <supercsv.version>2.4.0</supercsv.version>
         <cors.version>2.5</cors.version>
-        <tomcat.version>7.0.82</tomcat.version>
+        <tomcat.version>7.0.85</tomcat.version>
         <t-digest.version>3.1</t-digest.version>
+        <freemarker.version>2.3.23</freemarker.version>
         <!--metric-->
         <dropwizard.version>3.1.2</dropwizard.version>
         <!-- REST Service, ref https://github.com/spring-projects/spring-boot/blob/v1.3.8.RELEASE/spring-boot-dependencies/pom.xml -->
@@ -121,7 +121,7 @@
         <spring.framework.version>4.3.10.RELEASE</spring.framework.version>
         <spring.framework.security.version>4.2.3.RELEASE</spring.framework.security.version>
         <spring.framework.security.extensions.version>1.0.2.RELEASE</spring.framework.security.extensions.version>
-        <opensaml.version>2.6.4</opensaml.version>
+        <opensaml.version>2.6.6</opensaml.version>
         <aspectj.version>1.8.9</aspectj.version>
 
         <!-- Sonar -->
@@ -187,10 +187,10 @@
     </mailingLists>
 
     <scm>
-        <connection>scm:git:https://git-wip-us.apache.org/repos/asf/kylin.git</connection>
-        <developerConnection>scm:git:https://git-wip-us.apache.org/repos/asf/kylin.git
+        <connection>scm:git:git://github.com/apache/kylin.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/apache/kylin.git
         </developerConnection>
-        <url>https://git-wip-us.apache.org/repos/asf/kylin.git</url>
+        <url>https://github.com/apache/kylin</url>
         <tag>HEAD</tag>
     </scm>
 
@@ -465,6 +465,11 @@
                 <scope>provided</scope>
             </dependency>
             <dependency>
+                <groupId>org.apache.kylin</groupId>
+                <artifactId>kylin-external-htrace</artifactId>
+                <version>2.4.0-SNAPSHOT</version>
+            </dependency>
+            <dependency>
                 <groupId>commons-cli</groupId>
                 <artifactId>commons-cli</artifactId>
                 <version>${commons-cli.version}</version>
@@ -639,6 +644,16 @@
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-email</artifactId>
                 <version>${commons-email.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>commons-validator</groupId>
+                <artifactId>commons-validator</artifactId>
+                <version>${commons-validator.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.freemarker</groupId>
+                <artifactId>freemarker</artifactId>
+                <version>${freemarker.version}</version>
             </dependency>
 
             <!-- Logging -->
@@ -905,6 +920,11 @@
         </repository>
 
         <repository>
+            <id>shibboleth</id>
+            <url>https://build.shibboleth.net/nexus/content/repositories/releases/</url>
+        </repository>
+
+        <repository>
             <id>nexus</id>
             <name>Kyligence Repository</name>
             <url>http://repository.kyligence.io:8081/repository/maven-public/
@@ -1005,7 +1025,7 @@
                 <plugin>
                     <groupId>org.jacoco</groupId>
                     <artifactId>jacoco-maven-plugin</artifactId>
-                    <version>0.7.8</version>
+                    <version>0.8.0</version>
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
@@ -1036,9 +1056,9 @@
                     </executions>
                 </plugin>
                 <plugin>
-                    <groupId>org.codehaus.mojo</groupId>
-                    <artifactId>findbugs-maven-plugin</artifactId>
-                    <version>3.0.4</version>
+                    <groupId>com.github.spotbugs</groupId>
+                    <artifactId>spotbugs-maven-plugin</artifactId>
+                    <version>3.1.1</version>
                     <configuration>
                         <xmlOutput>true</xmlOutput>
                         <effort>Max</effort>
@@ -1075,7 +1095,7 @@
                                         </goals>
                                     </pluginExecutionFilter>
                                     <action>
-                                        <ignore/>
+                                        <ignore />
                                     </action>
                                 </pluginExecution>
                             </pluginExecutions>
@@ -1085,7 +1105,7 @@
                 <plugin>
                     <groupId>org.codehaus.mojo</groupId>
                     <artifactId>exec-maven-plugin</artifactId>
-                    <version>1.5.0</version>
+                    <version>1.6.0</version>
                 </plugin>
                 <plugin>
                     <groupId>org.springframework.boot</groupId>
@@ -1105,8 +1125,8 @@
                 <artifactId>maven-checkstyle-plugin</artifactId>
             </plugin>
             <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>findbugs-maven-plugin</artifactId>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs-maven-plugin</artifactId>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -1127,6 +1147,7 @@
     </build>
 
     <modules>
+        <module>external</module>
         <module>atopcalcite</module>
         <module>core-common</module>
         <module>core-metadata</module>
@@ -1183,9 +1204,9 @@
                 </reportSets>
             </plugin>
             <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>findbugs-maven-plugin</artifactId>
-                <version>3.0.4</version>
+                <groupId>com.github.spotbugs</groupId>
+                <artifactId>spotbugs-maven-plugin</artifactId>
+                <version>3.1.1</version>
             </plugin>
         </plugins>
     </reporting>
@@ -1195,6 +1216,9 @@
             <id>sandbox</id>
             <activation>
                 <activeByDefault>true</activeByDefault>
+                <property>
+                    <name>pre-commit</name>
+                </property>
             </activation>
             <build>
                 <plugins>
@@ -1236,12 +1260,6 @@
                     <plugin>
                         <groupId>org.jacoco</groupId>
                         <artifactId>jacoco-maven-plugin</artifactId>
-                        <configuration>
-                            <append>true</append>
-                            <destFile>
-                                ${sonar.jacoco.reportPath}
-                            </destFile>
-                        </configuration>
                         <executions>
                             <execution>
                                 <id>pre-test</id>
@@ -1249,6 +1267,8 @@
                                     <goal>prepare-agent</goal>
                                 </goals>
                                 <configuration>
+                                    <append>true</append>
+                                    <destFile>${sonar.jacoco.reportPath}</destFile>
                                     <propertyName>surefireArgLine</propertyName>
                                 </configuration>
                             </execution>
@@ -1258,6 +1278,9 @@
                                 <goals>
                                     <goal>report</goal>
                                 </goals>
+                                <configuration>
+                                    <dataFile>${sonar.jacoco.reportPath}</dataFile>
+                                </configuration>
                             </execution>
                         </executions>
                     </plugin>
@@ -1288,6 +1311,11 @@
                                 ${argLine} ${surefireArgLine}
                             </argLine>
                         </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.eluder.coveralls</groupId>
+                        <artifactId>coveralls-maven-plugin</artifactId>
+                        <version>4.2.0</version>
                     </plugin>
                 </plugins>
             </build>
@@ -1367,7 +1395,6 @@
                             </execution>
                         </executions>
                     </plugin>
-
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-surefire-plugin</artifactId>
@@ -1402,6 +1429,11 @@
             <!-- This profile adds/overrides few features of the 'apache-release'
                  profile in the parent pom. -->
             <id>apache-release</id>
+            <activation>
+                <property>
+                    <name>pre-commit</name>
+                </property>
+            </activation>
             <build>
                 <plugins>
                     <plugin>
@@ -1468,12 +1500,14 @@
                                 <exclude>**/src/test/resources/**</exclude>
                                 <exclude>examples/sample_cube/template/**</exclude>
                                 <exclude>examples/test_case_data/localmeta/**</exclude>
+                                <exclude>examples/test_metadata/**</exclude>
 
                                 <!-- generated files -->
                                 <exclude>**/target/**</exclude>
                                 <exclude>lib/**</exclude>
                                 <exclude>dist/**</exclude>
                                 <exclude>website/**</exclude>
+                                <exclude>**/dependency-reduced-pom.xml</exclude>
 
                                 <!-- text files without comments -->
                                 <exclude>**/*.csv</exclude>
@@ -1538,6 +1572,7 @@
                                 <exclude>**/*.DEF</exclude>
                                 <exclude>**/*.isl</exclude>
                                 <exclude>**/*.isproj</exclude>
+                                <exclude>**/*.bmp</exclude>
 
                                 <!-- protobuf generated -->
                                 <exclude>

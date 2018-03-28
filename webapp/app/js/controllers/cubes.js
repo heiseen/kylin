@@ -18,7 +18,7 @@
 
 'use strict';
 
-KylinApp.controller('CubesCtrl', function ($scope, $q, $routeParams, $location, $modal, MessageService, CubeDescService, CubeService, JobService, UserService, ProjectService, SweetAlert, loadingRequest, $log, cubeConfig, ProjectModel, ModelService, MetaModel, CubeList,modelsManager,TableService) {
+KylinApp.controller('CubesCtrl', function ($scope, $q, $routeParams, $location, $modal, MessageService, CubeDescService, CubeService, JobService, UserService, ProjectService, SweetAlert, loadingRequest, $log, cubeConfig, ProjectModel, ModelService, MetaModel, CubeList,modelsManager,TableService, kylinConfig) {
 
     $scope.cubeConfig = cubeConfig;
     $scope.cubeList = CubeList;
@@ -36,7 +36,7 @@ KylinApp.controller('CubesCtrl', function ($scope, $q, $routeParams, $location, 
     $scope.action = {};
 
     $scope.state = {
-      filterAttr: 'create_time', filterReverse: true, reverseColumn: 'create_time',
+      filterAttr: 'create_time_utc', filterReverse: true, reverseColumn: 'create_time_utc',
       dimensionFilter: '', measureFilter: ''
     };
 
@@ -293,6 +293,35 @@ KylinApp.controller('CubesCtrl', function ($scope, $q, $routeParams, $location, 
       });
     };
 
+    $scope.isAutoMigrateCubeEnabled = function(){
+      return kylinConfig.isAutoMigrateCubeEnabled();
+    };
+
+    $scope.migrateCube = function (cube) {
+      SweetAlert.swal({
+        title: '',
+        text: "The cube will overwrite the same cube in prod env" +
+        "\nMigrating cube will elapse a couple of minutes." +
+        "\nPlease wait.",
+        type: '',
+        showCancelButton: true,
+        confirmButtonColor: '#DD6B55',
+        confirmButtonText: "Yes",
+        closeOnConfirm: true
+      }, function(isConfirm) {
+        if(isConfirm){
+          loadingRequest.show();
+          CubeService.autoMigrate({cubeId: cube.name, propName: $scope.projectModel.selectedProject}, {}, function (result) {
+            loadingRequest.hide();
+            SweetAlert.swal('Success!', cube.name + ' migrate successfully!', 'success');
+          },function(e){
+            loadingRequest.hide();
+            SweetAlert.swal('Migrate failed!', "Please contact your ADMIN.", 'error');
+          });
+        }
+      });
+    };
+
     $scope.startJobSubmit = function (cube) {
 
       $scope.loadDetail(cube).then(function () {
@@ -464,8 +493,6 @@ KylinApp.controller('CubesCtrl', function ($scope, $q, $routeParams, $location, 
         });
       });
     }
-
-
     $scope.cubeEdit = function (cube) {
       $location.path("cubes/edit/" + cube.name);
     }
@@ -493,7 +520,28 @@ KylinApp.controller('CubesCtrl', function ($scope, $q, $routeParams, $location, 
           }
         });
       })
-    }
+    };
+
+     $scope.startDeleteSegment = function (cube) {
+       $scope.loadDetail(cube).then(function () {
+         $scope.metaModel={
+           model:modelsManager.getModelByCube(cube.name)
+         };
+         $modal.open({
+           templateUrl: 'deleteSegment.html',
+           controller: deleteSegmentCtrl,
+           resolve: {
+             cube: function () {
+               return cube;
+             },
+             scope: function() {
+               return $scope;
+             }
+           }
+         });
+       });
+     };
+
   });
 
 
@@ -610,11 +658,29 @@ var jobSubmitCtrl = function ($scope, $modalInstance, CubeService, MessageServic
             if (isConfirm) {
               $scope.jobBuildRequest.forceMergeEmptySegment = true;
               $scope.rebuild();
+              delete $scope.jobBuildRequest.forceMergeEmptySegment;
             }
           });
           return;
         }
 
+        if(message.indexOf("Merging segments must not have gaps between")!=-1){
+          SweetAlert.swal({
+            title:'',
+            type:'info',
+            text: 'There ares gaps between segments, do you want to merge segments forcely ?',
+            showCancelButton: true,
+            confirmButtonColor: '#DD6B55',
+            closeOnConfirm: true
+          }, function (isConfirm) {
+            if (isConfirm) {
+              $scope.jobBuildRequest.forceMergeEmptySegment = true;
+              $scope.rebuild();
+              delete $scope.jobBuildRequest.forceMergeEmptySegment;
+            }
+          });
+          return;
+        }
         var msg = !!(message) ? message : 'Failed to take action.';
         SweetAlert.swal('Oops...', msg, 'error');
       } else {
@@ -668,4 +734,49 @@ var streamingBuildCtrl = function ($scope, $modalInstance,kylinConfig) {
   $scope.cancel = function () {
     $modalInstance.dismiss('cancel');
   };
-}
+};
+
+var deleteSegmentCtrl = function($scope, $modalInstance, CubeService, SweetAlert, loadingRequest, cube, scope) {
+  $scope.cube = cube;
+  $scope.deleteSegments = [];
+  $scope.segment = {};
+
+  $scope.cancel = function () {
+    $modalInstance.dismiss('cancel');
+  };
+
+  $scope.deleteSegment = function() {
+    SweetAlert.swal({
+      title: '',
+      text: 'Are you sure to delete segment ['+$scope.segment.selected.name+']? ',
+      type: '',
+      showCancelButton: true,
+      confirmButtonColor: '#DD6B55',
+      confirmButtonText: "Yes",
+      closeOnConfirm: true
+    }, function(isConfirm) {
+      if(isConfirm){
+        loadingRequest.show();
+        CubeService.deleteSegment({cubeId: cube.name, propValue: $scope.segment.selected.name}, {}, function (result) {
+          loadingRequest.hide();
+          $modalInstance.dismiss('cancel');
+          scope.refreshCube(cube).then(function(_cube){
+           if(_cube && _cube.name){
+              scope.cubeList.cubes[scope.cubeList.cubes.indexOf(cube)] = _cube;
+           }
+          });
+          SweetAlert.swal('Success!', 'Delete segment successfully', 'success');
+        },function(e){
+          loadingRequest.hide();
+          if(e.data&& e.data.exception){
+            var message =e.data.exception;
+            var msg = !!(message) ? message : 'Failed to delete segment.';
+            SweetAlert.swal('Oops...', msg, 'error');
+          }else{
+            SweetAlert.swal('Oops...', 'Failed to delete segment.', 'error');
+          }
+        });
+      }
+    });
+  };
+};

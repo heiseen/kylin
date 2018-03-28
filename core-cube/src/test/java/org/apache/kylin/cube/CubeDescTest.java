@@ -34,6 +34,7 @@ import java.util.Map.Entry;
 import java.util.Set;
 import java.util.TreeSet;
 
+import com.google.common.collect.Lists;
 import org.apache.kylin.common.util.Array;
 import org.apache.kylin.common.util.JsonUtil;
 import org.apache.kylin.common.util.LocalFileMetadataTestCase;
@@ -322,20 +323,6 @@ public class CubeDescTest extends LocalFileMetadataTestCase {
     }
 
     @Test
-    public void testBadInit13() throws Exception {
-        thrown.expect(IllegalStateException.class);
-        CubeDesc cubeDesc = CubeDescManager.getInstance(getTestConfig()).getCubeDesc(CUBE_WITH_SLR_DESC);
-        MeasureDesc measureForTransCnt = cubeDesc.getMeasures().get(3);
-        Assert.assertEquals(measureForTransCnt.getName(), "TRANS_CNT");
-        thrown.expectMessage("measure (" + measureForTransCnt.getName() + ") is not in order");
-        HBaseColumnDesc colDesc = new HBaseColumnDesc();
-        colDesc.setQualifier("M");
-        colDesc.setMeasureRefs(new String[] { "GMV_SUM", "GMV_MIN", "GMV_MAX", "ITEM_COUNT_SUM", "TRANS_CNT" });
-        cubeDesc.getHbaseMapping().getColumnFamily()[0].getColumns()[0] = colDesc;
-        cubeDesc.initMeasureReferenceToColumnFamily();
-    }
-
-    @Test
     public void testBadInit14() throws Exception {
         thrown.expect(IllegalStateException.class);
         CubeDesc cubeDesc = CubeDescManager.getInstance(getTestConfig()).getCubeDesc(CUBE_WITH_SLR_DESC);
@@ -376,7 +363,7 @@ public class CubeDescTest extends LocalFileMetadataTestCase {
         }
 
         thrown.expect(TooManyCuboidException.class);
-        CubeDescManager.clearCache();
+        getTestConfig().clearManagers();
         CubeDesc cubeDesc = CubeDescManager.getInstance(getTestConfig())
                 .getCubeDesc("ut_cube_desc_combination_int_overflow");
         cubeDesc.init(getTestConfig());
@@ -391,8 +378,21 @@ public class CubeDescTest extends LocalFileMetadataTestCase {
 
         thrown.expect(IllegalArgumentException.class);
         thrown.expectMessage("Too many rowkeys (78) in CubeDesc, please try to reduce dimension number or adopt derived dimensions");
-        CubeDescManager.clearCache();
+        getTestConfig().clearManagers();
         CubeDesc cubeDesc = CubeDescManager.getInstance(getTestConfig()).getCubeDesc("ut_78_rowkeys");
+        cubeDesc.init(getTestConfig());
+    }
+
+    @Test
+    public void testValidateNotifyList() throws Exception{
+        thrown.expect(IllegalArgumentException.class);
+        thrown.expectMessage("Email [test] is not validation.");
+
+        CubeDesc cubeDesc = CubeDescManager.getInstance(getTestConfig()).getCubeDesc(CUBE_WITH_SLR_DESC);
+        List<String> notify = Lists.newArrayList();
+        notify.add("test");
+        cubeDesc.setNotifyList(notify);
+        cubeDesc.validateNotifyList();
         cubeDesc.init(getTestConfig());
     }
 
@@ -493,4 +493,5 @@ public class CubeDescTest extends LocalFileMetadataTestCase {
         Assert.assertNotNull(lc);
         Assert.assertTrue(lc.getAllCuboids().size() > 0);
     }
+
 }

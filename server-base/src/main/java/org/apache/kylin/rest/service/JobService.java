@@ -18,24 +18,18 @@
 
 package org.apache.kylin.rest.service;
 
-import java.io.IOException;
-import java.util.Calendar;
-import java.util.Collections;
-import java.util.Date;
-import java.util.EnumSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TimeZone;
-
-import javax.annotation.Nullable;
-
+import com.google.common.base.Function;
+import com.google.common.base.Predicate;
+import com.google.common.base.Predicates;
+import com.google.common.collect.FluentIterable;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.directory.api.util.Strings;
 import org.apache.kylin.common.KylinConfig;
-import org.apache.kylin.common.util.ClassUtil;
 import org.apache.kylin.common.util.Pair;
 import org.apache.kylin.cube.CubeInstance;
+import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.CubeSegment;
 import org.apache.kylin.cube.CubeUpdate;
 import org.apache.kylin.cube.model.CubeBuildTypeEnum;
@@ -57,7 +51,6 @@ import org.apache.kylin.job.execution.CheckpointExecutable;
 import org.apache.kylin.job.execution.DefaultChainedExecutable;
 import org.apache.kylin.job.execution.ExecutableState;
 import org.apache.kylin.job.execution.Output;
-import org.apache.kylin.job.lock.JobLock;
 import org.apache.kylin.metadata.model.SegmentRange;
 import org.apache.kylin.metadata.model.SegmentRange.TSRange;
 import org.apache.kylin.metadata.model.SegmentStatusEnum;
@@ -70,21 +63,25 @@ import org.apache.kylin.rest.util.AclEvaluate;
 import org.apache.kylin.source.ISource;
 import org.apache.kylin.source.SourceFactory;
 import org.apache.kylin.source.SourcePartition;
+import org.apache.kylin.storage.hbase.util.ZookeeperJobLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.EnableAspectJAutoProxy;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 
-import com.google.common.base.Function;
-import com.google.common.base.Predicate;
-import com.google.common.base.Predicates;
-import com.google.common.collect.FluentIterable;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
+import javax.annotation.Nullable;
+import java.io.IOException;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Date;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TimeZone;
 
 /**
  * @author ysong1
@@ -95,12 +92,6 @@ import com.google.common.collect.Sets;
 public class JobService extends BasicService implements InitializingBean {
 
     private static final Logger logger = LoggerFactory.getLogger(JobService.class);
-
-    private JobLock jobLock;
-
-    @Autowired
-    @Qualifier("accessService")
-    private AccessService accessService;
 
     @Autowired
     private AclEvaluate aclEvaluate;
@@ -123,13 +114,11 @@ public class JobService extends BasicService implements InitializingBean {
         final Scheduler<AbstractExecutable> scheduler = (Scheduler<AbstractExecutable>) SchedulerFactory
                 .scheduler(kylinConfig.getSchedulerType());
 
-        jobLock = (JobLock) ClassUtil.newInstance(kylinConfig.getJobControllerLock());
-
         new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    scheduler.init(new JobEngineConfig(kylinConfig), jobLock);
+                    scheduler.init(new JobEngineConfig(kylinConfig), new ZookeeperJobLock());
                     if (!scheduler.hasStarted()) {
                         logger.info("scheduler has not been started");
                     }
@@ -217,9 +206,6 @@ public class JobService extends BasicService implements InitializingBean {
         JobInstance jobInstance = submitJobInternal(cube, tsRange, segRange, sourcePartitionOffsetStart,
                 sourcePartitionOffsetEnd, buildType, force, submitter);
 
-        accessService.init(jobInstance, null);
-        accessService.inherit(jobInstance, cube);
-
         return jobInstance;
     }
 
@@ -267,10 +253,8 @@ public class JobService extends BasicService implements InitializingBean {
                 logger.error("Job submission might failed for NEW segment {}, will clean the NEW segment from cube",
                         newSeg.getName());
                 try {
-                    // Remove this segments
-                    CubeUpdate cubeBuilder = new CubeUpdate(cube);
-                    cubeBuilder.setToRemoveSegs(newSeg);
-                    getCubeManager().updateCube(cubeBuilder);
+                    // Remove this segment
+                    getCubeManager().updateCubeDropSegments(cube, newSeg);
                 } catch (Exception ee) {
                     // swallow the exception
                     logger.error("Clean New segment failed, ignoring it", e);
@@ -288,13 +272,6 @@ public class JobService extends BasicService implements InitializingBean {
             String submitter) throws IOException, JobException {
 
         Pair<JobInstance, List<JobInstance>> result = submitOptimizeJobInternal(cube, cuboidsRecommend, submitter);
-        accessService.init(result.getFirst(), null);
-        accessService.inherit(result.getFirst(), cube);
-        for (JobInstance jobInstance : result.getSecond()) {
-            accessService.init(jobInstance, null);
-            accessService.inherit(jobInstance, cube);
-        }
-
         return result;
     }
 
@@ -338,9 +315,7 @@ public class JobService extends BasicService implements InitializingBean {
                         optimizeSegments);
                 try {
                     // Remove this segments
-                    CubeUpdate cubeBuilder = new CubeUpdate(cube);
-                    cubeBuilder.setToRemoveSegs(optimizeSegments);
-                    getCubeManager().updateCube(cubeBuilder);
+                    getCubeManager().updateCubeDropSegments(cube, optimizeSegments);
                 } catch (Exception ee) {
                     // swallow the exception
                     logger.error("Clean New segments failed, ignoring it", e);
@@ -393,17 +368,12 @@ public class JobService extends BasicService implements InitializingBean {
 
         /** Add CubingJob for the related segment **/
         CubeSegment optimizeSegment = getCubeManager().appendSegment(cubeInstance, segment.getTSRange());
-        CubeUpdate cubeBuilder = new CubeUpdate(cubeInstance);
-        cubeBuilder.setToAddSegs(optimizeSegment);
-        getCubeManager().updateCube(cubeBuilder);
 
         DefaultChainedExecutable optimizeJob = EngineFactory.createBatchOptimizeJob(optimizeSegment, submitter);
 
         getExecutableManager().addJob(optimizeJob);
 
         JobInstance optimizeJobInstance = getSingleJobInstance(optimizeJob);
-        accessService.init(optimizeJobInstance, null);
-        accessService.inherit(optimizeJobInstance, cubeInstance);
 
         /** Update the checkpoint job */
         checkpointExecutable.getSubTasksForCheck().set(checkpointExecutable.getSubTasksForCheck().indexOf(toBeReplaced),
@@ -424,19 +394,23 @@ public class JobService extends BasicService implements InitializingBean {
     }
 
     private void checkAllowBuilding(CubeInstance cube) {
-        Segments<CubeSegment> readyPendingSegments = cube.getSegments(SegmentStatusEnum.READY_PENDING);
-        if (readyPendingSegments.size() > 0) {
-            throw new BadRequestException("The cube " + cube.getName() + " has READY_PENDING segments "
-                    + readyPendingSegments + ". It's not allowed for building");
+        if (cube.getConfig().isCubePlannerEnabled()) {
+            Segments<CubeSegment> readyPendingSegments = cube.getSegments(SegmentStatusEnum.READY_PENDING);
+            if (readyPendingSegments.size() > 0) {
+                throw new BadRequestException("The cube " + cube.getName() + " has READY_PENDING segments "
+                        + readyPendingSegments + ". It's not allowed for building");
+            }
         }
     }
 
     private void checkAllowParallelBuilding(CubeInstance cube) {
-        if (cube.getCuboids() == null) {
-            Segments<CubeSegment> cubeSegments = cube.getSegments();
-            if (cubeSegments.size() > 0 && cubeSegments.getSegments(SegmentStatusEnum.READY).size() <= 0) {
-                throw new BadRequestException("The cube " + cube.getName() + " has segments " + cubeSegments
-                        + ", but none of them is READY. It's not allowed for parallel building");
+        if (cube.getConfig().isCubePlannerEnabled()) {
+            if (cube.getCuboids() == null) {
+                Segments<CubeSegment> cubeSegments = cube.getSegments();
+                if (cubeSegments.size() > 0 && cubeSegments.getSegments(SegmentStatusEnum.READY).size() <= 0) {
+                    throw new BadRequestException("The cube " + cube.getName() + " has segments " + cubeSegments
+                            + ", but none of them is READY. It's not allowed for parallel building");
+                }
             }
         }
     }
@@ -482,9 +456,15 @@ public class JobService extends BasicService implements InitializingBean {
         }
 
         CubingJob cubeJob = (CubingJob) job;
+        CubeInstance cube = CubeManager.getInstance(KylinConfig.getInstanceFromEnv())
+                .getCube(CubingExecutableUtil.getCubeName(cubeJob.getParams()));
         final JobInstance result = new JobInstance();
         result.setName(job.getName());
-        result.setRelatedCube(CubingExecutableUtil.getCubeName(cubeJob.getParams()));
+        if (cube != null) {
+            result.setRelatedCube(cube.getDisplayName());
+        } else {
+            result.setRelatedCube(CubingExecutableUtil.getCubeName(cubeJob.getParams()));
+        }
         result.setRelatedSegment(CubingExecutableUtil.getSegmentId(cubeJob.getParams()));
         result.setLastModified(cubeJob.getLastModified());
         result.setSubmitter(cubeJob.getSubmitter());
@@ -571,19 +551,13 @@ public class JobService extends BasicService implements InitializingBean {
         // might not a cube job
         final String segmentIds = CubingExecutableUtil.getSegmentId(cubingJob.getParams());
         if (!StringUtils.isEmpty(segmentIds)) {
-            List<CubeSegment> toRemoveSegments = Lists.newLinkedList();
             for (String segmentId : StringUtils.split(segmentIds)) {
                 final CubeSegment segment = cubeInstance.getSegmentById(segmentId);
                 if (segment != null
                         && (segment.getStatus() == SegmentStatusEnum.NEW || segment.getTSRange().end.v == 0)) {
                     // Remove this segment
-                    toRemoveSegments.add(segment);
+                    getCubeManager().updateCubeDropSegments(cubeInstance, segment);
                 }
-            }
-            if (!toRemoveSegments.isEmpty()) {
-                CubeUpdate cubeBuilder = new CubeUpdate(cubeInstance);
-                cubeBuilder.setToRemoveSegs(toRemoveSegments.toArray(new CubeSegment[toRemoveSegments.size()]));
-                getCubeManager().updateCube(cubeBuilder);
             }
         }
         getExecutableManager().discardJob(cubingJob.getId());
@@ -633,12 +607,21 @@ public class JobService extends BasicService implements InitializingBean {
     public JobInstance pauseJob(JobInstance job) {
         aclEvaluate.checkProjectOperationPermission(job);
         getExecutableManager().pauseJob(job.getId());
+        job.setStatus(JobStatusEnum.STOPPED);
         return job;
     }
 
-    public void dropJob(JobInstance job) throws IOException {
+    public void dropJob(JobInstance job) {
         aclEvaluate.checkProjectOperationPermission(job);
+        if (job.getRelatedCube() != null && getCubeManager().getCube(job.getRelatedCube()) != null) {
+            if (job.getStatus() != JobStatusEnum.FINISHED && job.getStatus() != JobStatusEnum.DISCARDED) {
+                throw new BadRequestException(
+                        "Only FINISHED and DISCARDED job can be deleted. Please wait for the job finishing or discard the job!!!");
+            }
+        }
         getExecutableManager().deleteJob(job.getId());
+        logger.info("Delete job [" + job.getId() + "] trigger by + "
+                + SecurityContextHolder.getContext().getAuthentication().getName());
     }
 
     /**
@@ -648,10 +631,10 @@ public class JobService extends BasicService implements InitializingBean {
      */
     public List<JobInstance> searchJobs(final String cubeNameSubstring, final String projectName,
             final List<JobStatusEnum> statusList, final Integer limitValue, final Integer offsetValue,
-            final JobTimeFilterEnum timeFilter) {
+            final JobTimeFilterEnum timeFilter, JobSearchMode jobSearchMode) {
         Integer limit = (null == limitValue) ? 30 : limitValue;
         Integer offset = (null == offsetValue) ? 0 : offsetValue;
-        List<JobInstance> jobs = searchJobsByCubeName(cubeNameSubstring, projectName, statusList, timeFilter);
+        List<JobInstance> jobs = searchJobsByCubeName(cubeNameSubstring, projectName, statusList, timeFilter, jobSearchMode);
 
         Collections.sort(jobs);
 
@@ -668,11 +651,11 @@ public class JobService extends BasicService implements InitializingBean {
 
     public List<JobInstance> searchJobsByCubeName(final String cubeNameSubstring, final String projectName,
             final List<JobStatusEnum> statusList, final JobTimeFilterEnum timeFilter) {
-        return searchJobsByCubeName(cubeNameSubstring, projectName, statusList, timeFilter, JobSearchMode.ALL);
+        return searchJobsByCubeName(cubeNameSubstring, projectName, statusList, timeFilter, JobSearchMode.CUBING_ONLY);
     }
 
     public List<JobInstance> searchJobsByCubeName(final String cubeNameSubstring, final String projectName,
-            final List<JobStatusEnum> statusList, final JobTimeFilterEnum timeFilter, JobSearchMode jobSearchMode) {
+            final List<JobStatusEnum> statusList, final JobTimeFilterEnum timeFilter, final JobSearchMode jobSearchMode) {
         return innerSearchJobs(cubeNameSubstring, null, projectName, statusList, timeFilter, jobSearchMode);
     }
 
@@ -690,16 +673,16 @@ public class JobService extends BasicService implements InitializingBean {
             final List<JobStatusEnum> statusList, final JobTimeFilterEnum timeFilter, JobSearchMode jobSearchMode) {
         List<JobInstance> result = Lists.newArrayList();
         switch (jobSearchMode) {
-        case CUBING_ONLY:
+        case ALL:
             result.addAll(innerSearchCubingJobs(cubeName, jobName, projectName, statusList, timeFilter));
+            result.addAll(innerSearchCheckpointJobs(cubeName, jobName, projectName, statusList, timeFilter));
             break;
         case CHECKPOINT_ONLY:
             result.addAll(innerSearchCheckpointJobs(cubeName, jobName, projectName, statusList, timeFilter));
             break;
-        case ALL:
+        case CUBING_ONLY:
         default:
             result.addAll(innerSearchCubingJobs(cubeName, jobName, projectName, statusList, timeFilter));
-            result.addAll(innerSearchCheckpointJobs(cubeName, jobName, projectName, statusList, timeFilter));
         }
         return result;
     }
@@ -740,9 +723,9 @@ public class JobService extends BasicService implements InitializingBean {
     public List<CubingJob> innerSearchCubingJobs(final String cubeName, final String jobName,
             final Set<ExecutableState> statusList, long timeStartInMillis, long timeEndInMillis,
             final Map<String, Output> allOutputs, final boolean nameExactMatch, final String projectName) {
-        List<CubingJob> results = Lists.newArrayList(FluentIterable.from(
-                getExecutableManager().getAllAbstractExecutables(timeStartInMillis, timeEndInMillis, CubingJob.class))
-                .filter(new Predicate<AbstractExecutable>() {
+        List<CubingJob> results = Lists.newArrayList(
+                FluentIterable.from(getExecutableManager().getAllExecutables(timeStartInMillis, timeEndInMillis))
+                        .filter(new Predicate<AbstractExecutable>() {
                     @Override
                     public boolean apply(AbstractExecutable executable) {
                         if (executable instanceof CubingJob) {
@@ -839,8 +822,7 @@ public class JobService extends BasicService implements InitializingBean {
         List<CheckpointExecutable> results = Lists
                 .newArrayList(
                         FluentIterable
-                                .from(getExecutableManager().getAllAbstractExecutables(timeStartInMillis,
-                                        timeEndInMillis, CheckpointExecutable.class))
+                                .from(getExecutableManager().getAllExecutables(timeStartInMillis, timeEndInMillis))
                                 .filter(new Predicate<AbstractExecutable>() {
                                     @Override
                                     public boolean apply(AbstractExecutable executable) {

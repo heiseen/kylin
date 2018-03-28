@@ -25,11 +25,14 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.NavigableSet;
 import java.util.TreeSet;
 
+import com.google.common.base.Preconditions;
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.kylin.common.KylinConfig;
 import org.slf4j.Logger;
@@ -45,23 +48,38 @@ public class FileResourceStore extends ResourceStore {
 
     public FileResourceStore(KylinConfig kylinConfig) {
         super(kylinConfig);
-        root = new File(kylinConfig.getMetadataUrl().getIdentifier()).getAbsoluteFile();
+        root = new File(getPath(kylinConfig)).getAbsoluteFile();
         if (root.exists() == false)
             throw new IllegalArgumentException(
                     "File not exist by '" + kylinConfig.getMetadataUrl() + "': " + root.getAbsolutePath());
     }
 
-    @Override
-    protected NavigableSet<String> listResourcesImpl(String folderPath) throws IOException {
-        synchronized (FileResourceStore.class) {
-            String[] names = file(folderPath).list();
-            if (names == null) // not a directory
-                return null;
+    protected String getPath(KylinConfig kylinConfig) {
+        return kylinConfig.getMetadataUrl().getIdentifier();
+    }
 
+    @Override
+    protected NavigableSet<String> listResourcesImpl(String folderPath, boolean recursive) throws IOException {
+        synchronized (FileResourceStore.class) {
             TreeSet<String> r = new TreeSet<>();
+            File file = file(folderPath);
+            String[] names = file.list();
+            // not a directory
+            if (names == null)
+                return null;
             String prefix = folderPath.endsWith("/") ? folderPath : folderPath + "/";
-            for (String n : names) {
-                r.add(prefix + n);
+            if (recursive) {
+                Collection<File> files = FileUtils.listFiles(file, null, true);
+                for (File f : files) {
+                    String path = f.getAbsolutePath();
+                    String[] split = path.split(prefix);
+                    Preconditions.checkArgument(split.length == 2);
+                    r.add(prefix + split[1]);
+                }
+            } else {
+                for (String n : names) {
+                    r.add(prefix + n);
+                }
             }
             return r;
         }

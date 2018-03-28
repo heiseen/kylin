@@ -99,9 +99,9 @@ public class HBaseResourceStore extends ResourceStore {
 
         // control timeout for prompt error report
         Map<String, String> newParams = new LinkedHashMap<>();
-        newParams.put("hbase.client.scanner.timeout.period", "10000");
-        newParams.put("hbase.rpc.timeout", "5000");
-        newParams.put("hbase.client.retries.number", "1");
+        newParams.put("hbase.client.scanner.timeout.period", kylinConfig.getHbaseClientScannerTimeoutPeriod());
+        newParams.put("hbase.rpc.timeout", kylinConfig.getHbaseRpcTimeout());
+        newParams.put("hbase.client.retries.number", kylinConfig.getHbaseClientRetriesNumber());
         newParams.putAll(url.getAllParameters());
 
         return url.copy(newParams);
@@ -118,22 +118,30 @@ public class HBaseResourceStore extends ResourceStore {
     }
 
     @Override
-    protected NavigableSet<String> listResourcesImpl(String folderPath) throws IOException {
+    protected NavigableSet<String> listResourcesImpl(String folderPath, boolean recursive) throws IOException {
         final TreeSet<String> result = new TreeSet<>();
-
-        visitFolder(folderPath, new KeyOnlyFilter(), new FolderVisitor() {
-            @Override
-            public void visit(String childPath, String fullPath, Result hbaseResult) {
-                result.add(childPath);
-            }
-        });
+        if (recursive) {
+            visitFolder(folderPath, new KeyOnlyFilter(), new FolderVisitor() {
+                @Override
+                public void visit(String childPath, String fullPath, Result hbaseResult) {
+                    result.add(fullPath);
+                }
+            });
+        } else {
+            visitFolder(folderPath, new KeyOnlyFilter(), new FolderVisitor() {
+                @Override
+                public void visit(String childPath, String fullPath, Result hbaseResult) {
+                    result.add(childPath);
+                }
+            });
+        }
         // return null to indicate not a folder
         return result.isEmpty() ? null : result;
     }
 
     /* override get meta store uuid method for backward compatibility */
     @Override
-    public String createMetaStoreUUID() throws IOException {
+    protected String createMetaStoreUUID() throws IOException {
         try (final Admin hbaseAdmin = HBaseConnection.get(metadataUrl).getAdmin()) {
             final String metaStoreName = metadataUrl.getIdentifier();
             final HTableDescriptor desc = hbaseAdmin.getTableDescriptor(TableName.valueOf(metaStoreName));

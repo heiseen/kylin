@@ -23,6 +23,8 @@ import static org.apache.kylin.common.util.CheckUtil.checkCondition;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -56,8 +58,10 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.QueryContext;
+import org.apache.kylin.common.QueryContextFacade;
 import org.apache.kylin.common.debug.BackdoorToggles;
 import org.apache.kylin.common.exceptions.ResourceLimitExceededException;
+import org.apache.kylin.common.htrace.HtraceInit;
 import org.apache.kylin.common.persistence.ResourceStore;
 import org.apache.kylin.common.persistence.RootPersistentEntity;
 import org.apache.kylin.common.persistence.Serializer;
@@ -65,7 +69,6 @@ import org.apache.kylin.common.util.DBUtils;
 import org.apache.kylin.common.util.JsonUtil;
 import org.apache.kylin.common.util.Pair;
 import org.apache.kylin.common.util.SetThreadName;
-import org.apache.kylin.cube.CubeInstance;
 import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.cuboid.Cuboid;
 import org.apache.kylin.metadata.badquery.BadQueryEntry;
@@ -75,17 +78,16 @@ import org.apache.kylin.metadata.model.JoinTableDesc;
 import org.apache.kylin.metadata.model.ModelDimensionDesc;
 import org.apache.kylin.metadata.model.TableRef;
 import org.apache.kylin.metadata.project.ProjectInstance;
-import org.apache.kylin.metadata.project.RealizationEntry;
 import org.apache.kylin.metadata.querymeta.ColumnMeta;
 import org.apache.kylin.metadata.querymeta.ColumnMetaWithType;
 import org.apache.kylin.metadata.querymeta.SelectedColumnMeta;
 import org.apache.kylin.metadata.querymeta.TableMeta;
 import org.apache.kylin.metadata.querymeta.TableMetaWithType;
-import org.apache.kylin.metadata.realization.RealizationType;
 import org.apache.kylin.query.QueryConnection;
 import org.apache.kylin.query.relnode.OLAPContext;
 import org.apache.kylin.query.util.PushDownUtil;
 import org.apache.kylin.query.util.QueryUtil;
+import org.apache.kylin.query.util.TempStatementUtil;
 import org.apache.kylin.rest.constant.Constant;
 import org.apache.kylin.rest.exception.BadRequestException;
 import org.apache.kylin.rest.exception.InternalErrorException;
@@ -98,22 +100,22 @@ import org.apache.kylin.rest.request.PrepareSqlRequest;
 import org.apache.kylin.rest.request.SQLRequest;
 import org.apache.kylin.rest.response.SQLResponse;
 import org.apache.kylin.rest.util.AclEvaluate;
+import org.apache.kylin.rest.util.AclPermissionUtil;
+import org.apache.kylin.rest.util.QueryRequestLimits;
 import org.apache.kylin.rest.util.TableauInterceptor;
-import org.apache.kylin.storage.hybrid.HybridInstance;
+import org.apache.kylin.shaded.htrace.org.apache.htrace.Sampler;
+import org.apache.kylin.shaded.htrace.org.apache.htrace.Trace;
+import org.apache.kylin.shaded.htrace.org.apache.htrace.TraceScope;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.base.CharMatcher;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Splitter;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 
 import net.sf.ehcache.Cache;
@@ -169,14 +171,14 @@ public class QueryService extends BasicService {
     }
 
     public List<TableMeta> getMetadata(String project) throws SQLException {
-        return getMetadata(getCubeManager(), project, true);
+        return getMetadata(getCubeManager(), project);
     }
 
-    public SQLResponse query(SQLRequest sqlRequest) throws Exception {
+    public SQLResponse query(SQLRequest sqlRequest, String queryId) throws Exception {
         SQLResponse ret = null;
         try {
             final String user = SecurityContextHolder.getContext().getAuthentication().getName();
-            badQueryDetector.queryStart(Thread.currentThread(), sqlRequest, user);
+            badQueryDetector.queryStart(Thread.currentThread(), sqlRequest, user, queryId);
 
             ret = queryWithSqlMassage(sqlRequest);
             return ret;
@@ -184,6 +186,7 @@ public class QueryService extends BasicService {
         } finally {
             String badReason = (ret != null && ret.isPushDown()) ? BadQueryEntry.ADJ_PUSHDOWN : null;
             badQueryDetector.queryEnd(Thread.currentThread(), badReason);
+            Thread.interrupted(); //reset if interrupted
         }
     }
 
@@ -193,8 +196,8 @@ public class QueryService extends BasicService {
         Connection conn = null;
         try {
             conn = QueryConnection.getConnection(sqlRequest.getProject());
-            Pair<List<List<String>>, List<SelectedColumnMeta>> r = PushDownUtil
-                    .tryPushDownNonSelectQuery(sqlRequest.getProject(), sqlRequest.getSql(), conn.getSchema());
+            Pair<List<List<String>>, List<SelectedColumnMeta>> r = PushDownUtil.tryPushDownNonSelectQuery(
+                    sqlRequest.getProject(), sqlRequest.getSql(), conn.getSchema(), BackdoorToggles.getPrepareOnly());
 
             List<SelectedColumnMeta> columnMetas = Lists.newArrayList();
             columnMetas.add(new SelectedColumnMeta(false, false, false, false, 1, false, Integer.MAX_VALUE, "c0", "c0",
@@ -245,21 +248,26 @@ public class QueryService extends BasicService {
     }
 
     public List<Query> getQueries(final String creator) throws IOException {
+        return getQueries(creator, null);
+    }
+
+    public List<Query> getQueries(final String creator, final String project) throws IOException {
         if (null == creator) {
             return null;
         }
-        List<Query> queries = new ArrayList<Query>();
+        List<Query> queries = new ArrayList<>();
         QueryRecord record = queryStore.getResource(getQueryKeyById(creator), QueryRecord.class,
                 QueryRecordSerializer.getInstance());
         if (record != null) {
             for (Query query : record.getQueries()) {
-                queries.add(query);
+                if (project == null || query.getProject().equals(project))
+                    queries.add(query);
             }
         }
         return queries;
     }
 
-    public void logQuery(final SQLRequest request, final SQLResponse response) {
+    public void logQuery(final String queryId, final SQLRequest request, final SQLResponse response) {
         final String user = aclEvaluate.getCurrentUserName();
         final List<String> realizationNames = new LinkedList<>();
         final Set<Long> cuboidIds = new HashSet<Long>();
@@ -291,7 +299,7 @@ public class QueryService extends BasicService {
         StringBuilder stringBuilder = new StringBuilder();
         stringBuilder.append(newLine);
         stringBuilder.append("==========================[QUERY]===============================").append(newLine);
-        stringBuilder.append("Query Id: ").append(QueryContext.current().getQueryId()).append(newLine);
+        stringBuilder.append("Query Id: ").append(queryId).append(newLine);
         stringBuilder.append("SQL: ").append(request.getSql()).append(newLine);
         stringBuilder.append("User: ").append(user).append(newLine);
         stringBuilder.append("Success: ").append((null == response.getExceptionMessage())).append(newLine);
@@ -307,79 +315,22 @@ public class QueryService extends BasicService {
         stringBuilder.append("Hit Exception Cache: ").append(response.isHitExceptionCache()).append(newLine);
         stringBuilder.append("Storage cache used: ").append(storageCacheUsed).append(newLine);
         stringBuilder.append("Is Query Push-Down: ").append(isPushDown).append(newLine);
+        stringBuilder.append("Is Prepare: ").append(BackdoorToggles.getPrepareOnly()).append(newLine);
+        stringBuilder.append("Trace URL: ").append(response.getTraceUrl()).append(newLine);
         stringBuilder.append("Message: ").append(response.getExceptionMessage()).append(newLine);
         stringBuilder.append("==========================[QUERY]===============================").append(newLine);
 
         logger.info(stringBuilder.toString());
     }
 
-    public void checkAuthorization(SQLResponse sqlResponse, String project) throws AccessDeniedException {
-
-        //project 
-        ProjectInstance projectInstance = getProjectManager().getProject(project);
-        try {
-            if (aclEvaluate.hasProjectReadPermission(projectInstance)) {
-                return;
-            }
-        } catch (AccessDeniedException e) {
-            logger.warn(
-                    "Current user {} has no READ permission on current project {}, please ask Administrator for permission granting.");
-            //just continue
-        }
-
-        String realizationsStr = sqlResponse.getCube();//CUBE[name=abc],HYBRID[name=xyz]
-
-        if (StringUtils.isEmpty(realizationsStr)) {
-            throw new AccessDeniedException(
-                    "Query pushdown requires having READ permission on project, please ask Administrator to grant you permissions");
-        }
-
-        String[] splits = StringUtils.split(realizationsStr, ",");
-
-        for (String split : splits) {
-
-            Iterable<String> parts = Splitter.on(CharMatcher.anyOf("[]=,")).split(split);
-            String[] partsStr = Iterables.toArray(parts, String.class);
-
-            if (RealizationType.HYBRID.toString().equals(partsStr[0])) {
-                // special care for hybrid
-                HybridInstance hybridInstance = getHybridManager().getHybridInstance(partsStr[2]);
-                Preconditions.checkNotNull(hybridInstance);
-                checkHybridAuthorization(hybridInstance);
-            } else {
-                CubeInstance cubeInstance = getCubeManager().getCube(partsStr[2]);
-                checkCubeAuthorization(cubeInstance);
-            }
-        }
-    }
-
-    private void checkCubeAuthorization(CubeInstance cube) throws AccessDeniedException {
-        Preconditions.checkState(aclEvaluate.hasCubeReadPermission(cube));
-    }
-
-    private void checkHybridAuthorization(HybridInstance hybridInstance) throws AccessDeniedException {
-        List<RealizationEntry> realizationEntries = hybridInstance.getRealizationEntries();
-        for (RealizationEntry realizationEntry : realizationEntries) {
-            String reName = realizationEntry.getRealization();
-            if (RealizationType.CUBE == realizationEntry.getType()) {
-                CubeInstance cubeInstance = getCubeManager().getCube(reName);
-                checkCubeAuthorization(cubeInstance);
-            } else if (RealizationType.HYBRID == realizationEntry.getType()) {
-                HybridInstance innerHybridInstance = getHybridManager().getHybridInstance(reName);
-                checkHybridAuthorization(innerHybridInstance);
-            }
-        }
-    }
-
-    public SQLResponse queryWithoutSecure(SQLRequest sqlRequest) {
+    public SQLResponse doQueryWithCache(SQLRequest sqlRequest) {
+        long t = System.currentTimeMillis();
+        aclEvaluate.checkProjectReadPermission(sqlRequest.getProject());
+        logger.info("Check query permission in " + (System.currentTimeMillis() - t) + " ms.");
         return doQueryWithCache(sqlRequest, false);
     }
 
-    public SQLResponse doQueryWithCache(SQLRequest sqlRequest) {
-        return doQueryWithCache(sqlRequest, true);
-    }
-
-    public SQLResponse doQueryWithCache(SQLRequest sqlRequest, boolean secureEnabled) {
+    public SQLResponse doQueryWithCache(SQLRequest sqlRequest, boolean isQueryInspect) {
         Message msg = MsgPicker.getMsg();
         sqlRequest.setUsername(getUserName());
 
@@ -392,102 +343,69 @@ public class QueryService extends BasicService {
         if (StringUtils.isBlank(sqlRequest.getProject())) {
             throw new BadRequestException(msg.getEMPTY_PROJECT_NAME());
         }
+        if (StringUtils.isBlank(sqlRequest.getSql())) {
+            throw new BadRequestException(msg.getNULL_EMPTY_SQL());
+        }
 
         if (sqlRequest.getBackdoorToggles() != null)
             BackdoorToggles.addToggles(sqlRequest.getBackdoorToggles());
 
-        final QueryContext queryContext = QueryContext.current();
+        final QueryContext queryContext = QueryContextFacade.current();
+
+        TraceScope scope = null;
+        if (kylinConfig.isHtraceTracingEveryQuery() || BackdoorToggles.getHtraceEnabled()) {
+            logger.info("Current query is under tracing");
+            HtraceInit.init();
+            scope = Trace.startSpan("query life cycle for " + queryContext.getQueryId(), Sampler.ALWAYS);
+        }
+        String traceUrl = getTraceUrl(scope);
 
         try (SetThreadName ignored = new SetThreadName("Query %s", queryContext.getQueryId())) {
+            SQLResponse sqlResponse = null;
             String sql = sqlRequest.getSql();
             String project = sqlRequest.getProject();
+            boolean isQueryCacheEnabled = isQueryCacheEnabled(kylinConfig);
             logger.info("Using project: " + project);
             logger.info("The original query:  " + sql);
 
-            final boolean isSelect = QueryUtil.isSelectStatement(sql);
+            sql = QueryUtil.removeCommentInSql(sql);
 
-            long startTime = System.currentTimeMillis();
+            Pair<Boolean, String> result = TempStatementUtil.handleTempStatement(sql, kylinConfig);
+            boolean isCreateTempStatement = result.getFirst();
+            sql = result.getSecond();
+            sqlRequest.setSql(sql);
 
-            // force clear the query context before a new query
-            OLAPContext.clearThreadLocalContexts();
+            // try some cheap executions
+            if (sqlResponse == null && isQueryInspect) {
+                sqlResponse = new SQLResponse(null, null, 0, false, sqlRequest.getSql());
+            }
 
-            SQLResponse sqlResponse = null;
-            boolean queryCacheEnabled = checkCondition(kylinConfig.isQueryCacheEnabled(),
-                    "query cache disabled in KylinConfig") && //
-                    checkCondition(!BackdoorToggles.getDisableCache(), "query cache disabled in BackdoorToggles");
+            if (sqlResponse == null && isCreateTempStatement) {
+                sqlResponse = new SQLResponse(null, null, 0, false, null);
+            }
 
-            if (queryCacheEnabled) {
+            if (sqlResponse == null && isQueryCacheEnabled) {
                 sqlResponse = searchQueryInCache(sqlRequest);
+                Trace.addTimelineAnnotation("query cache searched");
             }
 
+            // real execution if required
+            if (sqlResponse == null) {
+                try (QueryRequestLimits limit = new QueryRequestLimits(sqlRequest.getProject())) {
+                    sqlResponse = queryAndUpdateCache(sqlRequest, isQueryCacheEnabled);
+                }
+            } else {
+                Trace.addTimelineAnnotation("response without real execution");
+            }
+
+            sqlResponse.setDuration(queryContext.getAccumulatedMillis());
+            sqlResponse.setTraceUrl(traceUrl);
+            logQuery(queryContext.getQueryId(), sqlRequest, sqlResponse);
             try {
-                if (null == sqlResponse) {
-                    if (isSelect) {
-                        sqlResponse = query(sqlRequest);
-                    } else if (kylinConfig.isPushDownEnabled() && kylinConfig.isPushDownUpdateEnabled()) {
-                        sqlResponse = update(sqlRequest);
-                    } else {
-                        logger.debug(
-                                "Directly return exception as the sql is unsupported, and query pushdown is disabled");
-                        throw new BadRequestException(msg.getNOT_SUPPORTED_SQL());
-                    }
-
-                    long durationThreshold = kylinConfig.getQueryDurationCacheThreshold();
-                    long scanCountThreshold = kylinConfig.getQueryScanCountCacheThreshold();
-                    long scanBytesThreshold = kylinConfig.getQueryScanBytesCacheThreshold();
-                    sqlResponse.setDuration(System.currentTimeMillis() - startTime);
-                    logger.info("Stats of SQL response: isException: {}, duration: {}, total scan count {}", //
-                            String.valueOf(sqlResponse.getIsException()), String.valueOf(sqlResponse.getDuration()),
-                            String.valueOf(sqlResponse.getTotalScanCount()));
-                    if (checkCondition(queryCacheEnabled, "query cache is disabled") //
-                            && checkCondition(!sqlResponse.getIsException(), "query has exception") //
-                            && checkCondition(!(sqlResponse.isPushDown()
-                                    && (isSelect == false || kylinConfig.isPushdownQueryCacheEnabled() == false)),
-                                    "query is executed with pushdown, but it is non-select, or the cache for pushdown is disabled") //
-                            && checkCondition(
-                                    sqlResponse.getDuration() > durationThreshold
-                                            || sqlResponse.getTotalScanCount() > scanCountThreshold
-                                            || sqlResponse.getTotalScanBytes() > scanBytesThreshold, //
-                                    "query is too lightweight with duration: {} (threshold {}), scan count: {} (threshold {}), scan bytes: {} (threshold {})",
-                                    sqlResponse.getDuration(), durationThreshold, sqlResponse.getTotalScanCount(),
-                                    scanCountThreshold, sqlResponse.getTotalScanBytes(), scanBytesThreshold)
-                            && checkCondition(sqlResponse.getResults().size() < kylinConfig.getLargeQueryThreshold(),
-                                    "query response is too large: {} ({})", sqlResponse.getResults().size(),
-                                    kylinConfig.getLargeQueryThreshold())) {
-                        cacheManager.getCache(SUCCESS_QUERY_CACHE)
-                                .put(new Element(sqlRequest.getCacheKey(), sqlResponse));
-                    }
-
-                } else {
-                    sqlResponse.setDuration(System.currentTimeMillis() - startTime);
-                    sqlResponse.setTotalScanCount(0);
-                    sqlResponse.setTotalScanBytes(0);
-                }
-
-                checkQueryAuth(sqlResponse, project, secureEnabled);
-
-            } catch (Throwable e) { // calcite may throw AssertError
-                logger.error("Exception while executing query", e);
-                String errMsg = makeErrorMsgUserFriendly(e);
-
-                sqlResponse = new SQLResponse(null, null, 0, true, errMsg);
-                sqlResponse.setThrowable(e.getCause() == null ? e : ExceptionUtils.getRootCause(e));
-                sqlResponse.setTotalScanCount(queryContext.getScannedRows());
-                sqlResponse.setTotalScanBytes(queryContext.getScannedBytes());
-                sqlResponse.setCubeSegmentStatisticsList(queryContext.getCubeSegmentStatisticsResultList());
-
-                if (queryCacheEnabled && e.getCause() != null
-                        && ExceptionUtils.getRootCause(e) instanceof ResourceLimitExceededException) {
-                    Cache exceptionCache = cacheManager.getCache(EXCEPTION_QUERY_CACHE);
-                    exceptionCache.put(new Element(sqlRequest.getCacheKey(), sqlResponse));
-                }
+                recordMetric(sqlRequest, sqlResponse);
+            } catch (Throwable th) {
+                logger.warn("Write metric error.", th);
             }
-
-            logQuery(sqlRequest, sqlResponse);
-
-            QueryMetricsFacade.updateMetrics(sqlRequest, sqlResponse);
-            QueryMetrics2Facade.updateMetrics(sqlRequest, sqlResponse);
-
             if (sqlResponse.getIsException())
                 throw new InternalErrorException(sqlResponse.getExceptionMessage());
 
@@ -495,8 +413,111 @@ public class QueryService extends BasicService {
 
         } finally {
             BackdoorToggles.cleanToggles();
-            QueryContext.reset();
+            QueryContextFacade.resetCurrent();
+            if (scope != null) {
+                scope.close();
+            }
         }
+    }
+
+    private SQLResponse queryAndUpdateCache(SQLRequest sqlRequest, boolean queryCacheEnabled) {
+        KylinConfig kylinConfig = KylinConfig.getInstanceFromEnv();
+        Message msg = MsgPicker.getMsg();
+        final QueryContext queryContext = QueryContextFacade.current();
+
+        SQLResponse sqlResponse = null;
+        try {
+            final boolean isSelect = QueryUtil.isSelectStatement(sqlRequest.getSql());
+            if (isSelect) {
+                sqlResponse = query(sqlRequest, queryContext.getQueryId());
+                Trace.addTimelineAnnotation("query almost done");
+            } else if (kylinConfig.isPushDownEnabled() && kylinConfig.isPushDownUpdateEnabled()) {
+                sqlResponse = update(sqlRequest);
+                Trace.addTimelineAnnotation("update query almost done");
+            } else {
+                logger.debug("Directly return exception as the sql is unsupported, and query pushdown is disabled");
+                throw new BadRequestException(msg.getNOT_SUPPORTED_SQL());
+            }
+
+            long durationThreshold = kylinConfig.getQueryDurationCacheThreshold();
+            long scanCountThreshold = kylinConfig.getQueryScanCountCacheThreshold();
+            long scanBytesThreshold = kylinConfig.getQueryScanBytesCacheThreshold();
+            sqlResponse.setDuration(queryContext.getAccumulatedMillis());
+            logger.info("Stats of SQL response: isException: {}, duration: {}, total scan count {}", //
+                    String.valueOf(sqlResponse.getIsException()), String.valueOf(sqlResponse.getDuration()),
+                    String.valueOf(sqlResponse.getTotalScanCount()));
+            if (checkCondition(queryCacheEnabled, "query cache is disabled") //
+                    && checkCondition(!sqlResponse.getIsException(), "query has exception") //
+                    && checkCondition(
+                            !(sqlResponse.isPushDown()
+                                    && (isSelect == false || kylinConfig.isPushdownQueryCacheEnabled() == false)),
+                            "query is executed with pushdown, but it is non-select, or the cache for pushdown is disabled") //
+                    && checkCondition(
+                            sqlResponse.getDuration() > durationThreshold
+                                    || sqlResponse.getTotalScanCount() > scanCountThreshold
+                                    || sqlResponse.getTotalScanBytes() > scanBytesThreshold, //
+                            "query is too lightweight with duration: {} (threshold {}), scan count: {} (threshold {}), scan bytes: {} (threshold {})",
+                            sqlResponse.getDuration(), durationThreshold, sqlResponse.getTotalScanCount(),
+                            scanCountThreshold, sqlResponse.getTotalScanBytes(), scanBytesThreshold)
+                    && checkCondition(sqlResponse.getResults().size() < kylinConfig.getLargeQueryThreshold(),
+                            "query response is too large: {} ({})", sqlResponse.getResults().size(),
+                            kylinConfig.getLargeQueryThreshold())) {
+                cacheManager.getCache(SUCCESS_QUERY_CACHE).put(new Element(sqlRequest.getCacheKey(), sqlResponse));
+            }
+            Trace.addTimelineAnnotation("response from execution");
+
+        } catch (Throwable e) { // calcite may throw AssertError
+            queryContext.stop(e);
+
+            logger.error("Exception while executing query", e);
+            String errMsg = makeErrorMsgUserFriendly(e);
+
+            sqlResponse = new SQLResponse(null, null, null, 0, true, errMsg, false, false);
+            sqlResponse.setTotalScanCount(queryContext.getScannedRows());
+            sqlResponse.setTotalScanBytes(queryContext.getScannedBytes());
+            sqlResponse.setCubeSegmentStatisticsList(queryContext.getCubeSegmentStatisticsResultList());
+
+            if (queryCacheEnabled && e.getCause() != null
+                    && ExceptionUtils.getRootCause(e) instanceof ResourceLimitExceededException) {
+                Cache exceptionCache = cacheManager.getCache(EXCEPTION_QUERY_CACHE);
+                exceptionCache.put(new Element(sqlRequest.getCacheKey(), sqlResponse));
+            }
+            Trace.addTimelineAnnotation("error response");
+        }
+        return sqlResponse;
+    }
+
+    private boolean isQueryCacheEnabled(KylinConfig kylinConfig) {
+        return checkCondition(kylinConfig.isQueryCacheEnabled(), "query cache disabled in KylinConfig") && //
+                checkCondition(!BackdoorToggles.getDisableCache(), "query cache disabled in BackdoorToggles");
+    }
+
+    protected void recordMetric(SQLRequest sqlRequest, SQLResponse sqlResponse) throws UnknownHostException {
+        QueryMetricsFacade.updateMetrics(sqlRequest, sqlResponse);
+        QueryMetrics2Facade.updateMetrics(sqlRequest, sqlResponse);
+    }
+
+    private String getTraceUrl(TraceScope scope) {
+        if (scope == null) {
+            return null;
+        }
+
+        String hostname = System.getProperty("zipkin.collector-hostname");
+        if (StringUtils.isEmpty(hostname)) {
+            try {
+                hostname = InetAddress.getLocalHost().getHostName();
+            } catch (UnknownHostException e) {
+                logger.debug("failed to get trace url due to " + e.getMessage());
+                return null;
+            }
+        }
+
+        String port = System.getProperty("zipkin.web-ui-port");
+        if (StringUtils.isEmpty(port)) {
+            port = "9411";
+        }
+
+        return "http://" + hostname + ":" + port + "/zipkin/traces/" + Long.toHexString(scope.getSpan().getTraceId());
     }
 
     private String getUserName() {
@@ -526,13 +547,6 @@ public class QueryService extends BasicService {
         return response;
     }
 
-    protected void checkQueryAuth(SQLResponse sqlResponse, String project, boolean secureEnabled)
-            throws AccessDeniedException {
-        if (!sqlResponse.getIsException() && KylinConfig.getInstanceFromEnv().isQuerySecureEnabled() && secureEnabled) {
-            checkAuthorization(sqlResponse, project);
-        }
-    }
-
     private SQLResponse queryWithSqlMassage(SQLRequest sqlRequest) throws Exception {
         Connection conn = null;
 
@@ -540,8 +554,9 @@ public class QueryService extends BasicService {
             conn = QueryConnection.getConnection(sqlRequest.getProject());
 
             String userInfo = SecurityContextHolder.getContext().getAuthentication().getName();
-            QueryContext context = QueryContext.current();
+            QueryContext context = QueryContextFacade.current();
             context.setUsername(userInfo);
+            context.setGroups(AclPermissionUtil.getCurrentUserGroups());
             final Collection<? extends GrantedAuthority> grantedAuthorities = SecurityContextHolder.getContext()
                     .getAuthentication().getAuthorities();
             for (GrantedAuthority grantedAuthority : grantedAuthorities) {
@@ -563,12 +578,15 @@ public class QueryService extends BasicService {
                 //CAUTION: should not change sqlRequest content!
                 //sqlRequest.setSql(correctedSql);
             }
+            Trace.addTimelineAnnotation("query massaged");
 
             // add extra parameters into olap context, like acceptPartial
             Map<String, String> parameters = new HashMap<String, String>();
             parameters.put(OLAPContext.PRM_USER_AUTHEN_INFO, userInfo);
             parameters.put(OLAPContext.PRM_ACCEPT_PARTIAL_RESULT, String.valueOf(sqlRequest.isAcceptPartial()));
             OLAPContext.setParameters(parameters);
+            // force clear the query context before a new query
+            OLAPContext.clearThreadLocalContexts();
 
             return execute(correctedSql, sqlRequest, conn);
 
@@ -577,7 +595,7 @@ public class QueryService extends BasicService {
         }
     }
 
-    protected List<TableMeta> getMetadata(CubeManager cubeMgr, String project, boolean cubedOnly) throws SQLException {
+    protected List<TableMeta> getMetadata(CubeManager cubeMgr, String project) throws SQLException {
 
         Connection conn = null;
         ResultSet columnMeta = null;
@@ -603,8 +621,7 @@ public class QueryService extends BasicService {
                         schemaName == null ? Constant.FakeSchemaName : schemaName, JDBCTableMeta.getString(3),
                         JDBCTableMeta.getString(4), JDBCTableMeta.getString(5), null, null, null, null, null);
 
-                if (!cubedOnly
-                        || getProjectManager().isExposedTable(project, schemaName + "." + tblMeta.getTABLE_NAME())) {
+                if (!"metadata".equalsIgnoreCase(tblMeta.getTABLE_SCHEM())) {
                     tableMetas.add(tblMeta);
                     tableMap.put(tblMeta.getTABLE_SCHEM() + "#" + tblMeta.getTABLE_NAME(), tblMeta);
                 }
@@ -627,12 +644,11 @@ public class QueryService extends BasicService {
                         columnMeta.getString(20), columnMeta.getString(21), getShort(columnMeta.getString(22)),
                         columnMeta.getString(23));
 
-                if (!cubedOnly || getProjectManager().isExposedColumn(project,
-                        schemaName + "." + colmnMeta.getTABLE_NAME(), colmnMeta.getCOLUMN_NAME())) {
+                if (!"metadata".equalsIgnoreCase(colmnMeta.getTABLE_SCHEM())
+                        && !colmnMeta.getCOLUMN_NAME().toUpperCase().startsWith("_KY_")) {
                     tableMap.get(colmnMeta.getTABLE_SCHEM() + "#" + colmnMeta.getTABLE_NAME()).addColumn(colmnMeta);
                 }
             }
-
         } finally {
             close(columnMeta, null, conn);
             if (JDBCTableMeta != null) {
@@ -644,11 +660,11 @@ public class QueryService extends BasicService {
     }
 
     public List<TableMetaWithType> getMetadataV2(String project) throws SQLException, IOException {
-        return getMetadataV2(getCubeManager(), project, true);
+        return getMetadataV2(getCubeManager(), project);
     }
 
     @SuppressWarnings("checkstyle:methodlength")
-    protected List<TableMetaWithType> getMetadataV2(CubeManager cubeMgr, String project, boolean cubedOnly)
+    protected List<TableMetaWithType> getMetadataV2(CubeManager cubeMgr, String project)
             throws SQLException, IOException {
         //Message msg = MsgPicker.getMsg();
 
@@ -680,8 +696,7 @@ public class QueryService extends BasicService {
                         schemaName == null ? Constant.FakeSchemaName : schemaName, JDBCTableMeta.getString(3),
                         JDBCTableMeta.getString(4), JDBCTableMeta.getString(5), null, null, null, null, null);
 
-                if (!cubedOnly
-                        || getProjectManager().isExposedTable(project, schemaName + "." + tblMeta.getTABLE_NAME())) {
+                if (!"metadata".equalsIgnoreCase(tblMeta.getTABLE_SCHEM())) {
                     tableMetas.add(tblMeta);
                     tableMap.put(tblMeta.getTABLE_SCHEM() + "#" + tblMeta.getTABLE_NAME(), tblMeta);
                 }
@@ -705,8 +720,8 @@ public class QueryService extends BasicService {
                         columnMeta.getString(20), columnMeta.getString(21), getShort(columnMeta.getString(22)),
                         columnMeta.getString(23));
 
-                if (!cubedOnly || getProjectManager().isExposedColumn(project,
-                        schemaName + "." + colmnMeta.getTABLE_NAME(), colmnMeta.getCOLUMN_NAME())) {
+                if (!"metadata".equalsIgnoreCase(colmnMeta.getTABLE_SCHEM())
+                        && !colmnMeta.getCOLUMN_NAME().toUpperCase().startsWith("_KY_")) {
                     tableMap.get(colmnMeta.getTABLE_SCHEM() + "#" + colmnMeta.getTABLE_NAME()).addColumn(colmnMeta);
                     columnMap.put(colmnMeta.getTABLE_SCHEM() + "#" + colmnMeta.getTABLE_NAME() + "#"
                             + colmnMeta.getCOLUMN_NAME(), colmnMeta);
@@ -874,10 +889,11 @@ public class QueryService extends BasicService {
             Pair<List<List<String>>, List<SelectedColumnMeta>> r = null;
             try {
                 r = PushDownUtil.tryPushDownSelectQuery(sqlRequest.getProject(), correctedSql, conn.getSchema(),
-                        sqlException);
+                        sqlException, BackdoorToggles.getPrepareOnly());
             } catch (Exception e2) {
-                //exception in pushdown engine will be printed, but we'll not re-throw it, we'll 
-                logger.info("pushdown engine failed current query too", e2);
+                logger.error("pushdown engine failed current query too", e2);
+                //exception in pushdown, throw it instead of exception in calcite
+                throw e2;
             }
 
             if (r == null)
@@ -922,6 +938,10 @@ public class QueryService extends BasicService {
 
                     RelDataTypeField field = fieldList.get(i);
                     String columnName = field.getKey();
+
+                    if (columnName.startsWith("_KY_")) {
+                        continue;
+                    }
                     BasicSqlType basicSqlType = (BasicSqlType) field.getValue();
 
                     columnMetas.add(new SelectedColumnMeta(false, config.caseSensitive(), false, false,
@@ -956,6 +976,7 @@ public class QueryService extends BasicService {
         boolean isPartialResult = false;
         StringBuilder cubeSb = new StringBuilder();
         StringBuilder logSb = new StringBuilder("Processed rows for each storageContext: ");
+        QueryContext queryContext = QueryContextFacade.current();
         if (OLAPContext.getThreadLocalContexts() != null) { // contexts can be null in case of 'explain plan for'
             for (OLAPContext ctx : OLAPContext.getThreadLocalContexts()) {
                 String realizationName = "NULL";
@@ -971,16 +992,16 @@ public class QueryService extends BasicService {
                     realizationName = ctx.realization.getName();
                     realizationType = ctx.realization.getStorageType();
                 }
-                QueryContext.current().setContextRealization(ctx.id, realizationName, realizationType);
+                queryContext.setContextRealization(ctx.id, realizationName, realizationType);
             }
         }
         logger.info(logSb.toString());
 
         SQLResponse response = new SQLResponse(columnMetas, results, cubeSb.toString(), 0, false, null, isPartialResult,
                 isPushDown);
-        response.setTotalScanCount(QueryContext.current().getScannedRows());
-        response.setTotalScanBytes(QueryContext.current().getScannedBytes());
-        response.setCubeSegmentStatisticsList(QueryContext.current().getCubeSegmentStatisticsResultList());
+        response.setTotalScanCount(queryContext.getScannedRows());
+        response.setTotalScanBytes(queryContext.getScannedBytes());
+        response.setCubeSegmentStatisticsList(queryContext.getCubeSegmentStatisticsResultList());
         return response;
     }
 

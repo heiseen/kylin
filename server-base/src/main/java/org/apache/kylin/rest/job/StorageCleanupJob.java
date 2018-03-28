@@ -32,7 +32,6 @@ import org.apache.commons.cli.Option;
 import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.cli.Options;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -51,6 +50,7 @@ import org.apache.kylin.job.engine.JobEngineConfig;
 import org.apache.kylin.job.execution.AbstractExecutable;
 import org.apache.kylin.job.execution.ExecutableManager;
 import org.apache.kylin.job.execution.ExecutableState;
+import org.apache.kylin.metadata.MetadataConstants;
 import org.apache.kylin.source.ISourceMetadataExplorer;
 import org.apache.kylin.source.SourceFactory;
 import org.slf4j.Logger;
@@ -70,11 +70,26 @@ public class StorageCleanupJob extends AbstractApplication {
 
     protected static final Logger logger = LoggerFactory.getLogger(StorageCleanupJob.class);
     public static final int deleteTimeout = 10; // Unit minute
-
+    protected FileSystem hbaseFs;
+    protected FileSystem defaultFs;
     protected boolean delete = false;
     protected boolean force = false;
     protected static ExecutableManager executableManager = ExecutableManager.getInstance(KylinConfig
             .getInstanceFromEnv());
+
+    public StorageCleanupJob(FileSystem defaultFs, FileSystem hbaseFs) {
+        this.defaultFs = defaultFs;
+        this.hbaseFs = hbaseFs;
+    }
+
+    public StorageCleanupJob() throws IOException {
+        this.defaultFs = HadoopUtil.getWorkingFileSystem();
+        this.hbaseFs = HadoopUtil.getWorkingFileSystem(HBaseConfiguration.create());
+    }
+
+    public void setDelete(boolean delete) {
+        this.delete = delete;
+    }
 
     protected void cleanUnusedHBaseTables() throws IOException {
         KylinConfig config = KylinConfig.getInstanceFromEnv();
@@ -106,21 +121,29 @@ public class StorageCleanupJob extends AbstractApplication {
         logger.info("force option value: '" + optionsHelper.getOptionValue(OPTION_FORCE) + "'");
         delete = Boolean.parseBoolean(optionsHelper.getOptionValue(OPTION_DELETE));
         force = Boolean.parseBoolean(optionsHelper.getOptionValue(OPTION_FORCE));
-        cleanUnusedIntermediateHiveTable();
+
         KylinConfig config = KylinConfig.getInstanceFromEnv();
+        cleanUnusedIntermediateHiveTable(getHiveTables(), getCliCommandExecutor());
+
         if (StringUtils.isNotEmpty(config.getHBaseClusterFs())) {
-            cleanUnusedHdfsFiles(HBaseConfiguration.create());
+            cleanUnusedHdfsFiles(hbaseFs);
         }
-        Configuration conf = HadoopUtil.getCurrentConfiguration();
-        cleanUnusedHdfsFiles(conf);
+        cleanUnusedHdfsFiles(defaultFs);
         cleanUnusedHBaseTables();
     }
 
-    private void cleanUnusedHdfsFiles(Configuration conf) throws IOException {
+    protected List<String> getHiveTables() throws Exception {
+        ISourceMetadataExplorer explr = SourceFactory.getDefaultSource().getSourceMetadataExplorer();
+        return explr.listTables(KylinConfig.getInstanceFromEnv().getHiveDatabaseForIntermediateTable());
+    }
 
+    protected CliCommandExecutor getCliCommandExecutor() throws IOException {
+        return KylinConfig.getInstanceFromEnv().getCliCommandExecutor();
+    }
+
+    void cleanUnusedHdfsFiles(FileSystem fs) throws IOException {
         JobEngineConfig engineConfig = new JobEngineConfig(KylinConfig.getInstanceFromEnv());
         CubeManager cubeMgr = CubeManager.getInstance(KylinConfig.getInstanceFromEnv());
-        FileSystem fs = HadoopUtil.getWorkingFileSystem(conf);
         List<String> allHdfsPathsNeedToBeDeleted = new ArrayList<String>();
         // GlobFilter filter = new
         // GlobFilter(KylinConfig.getInstanceFromEnv().getHdfsWorkingDirectory()
@@ -128,12 +151,14 @@ public class StorageCleanupJob extends AbstractApplication {
         // TODO: when first use, /kylin/kylin_metadata does not exist.
         try {
             FileStatus[] fStatus = fs.listStatus(new Path(KylinConfig.getInstanceFromEnv().getHdfsWorkingDirectory()));
-            for (FileStatus status : fStatus) {
-                String path = status.getPath().getName();
-                // System.out.println(path);
-                if (path.startsWith("kylin-")) {
-                    String kylinJobPath = engineConfig.getHdfsWorkingDirectory() + path;
-                    allHdfsPathsNeedToBeDeleted.add(kylinJobPath);
+            if (fStatus != null) {
+                for (FileStatus status : fStatus) {
+                    String path = status.getPath().getName();
+                    // System.out.println(path);
+                    if (path.startsWith("kylin-")) {
+                        String kylinJobPath = engineConfig.getHdfsWorkingDirectory() + path;
+                        allHdfsPathsNeedToBeDeleted.add(kylinJobPath);
+                    }
                 }
             }
         } catch (FileNotFoundException e) {
@@ -186,21 +211,17 @@ public class StorageCleanupJob extends AbstractApplication {
         }
     }
 
-    private void cleanUnusedIntermediateHiveTable() throws Exception {
-        Configuration conf = HadoopUtil.getCurrentConfiguration();
+    void cleanUnusedIntermediateHiveTable(List<String> hiveTableNames, CliCommandExecutor cmdExec) throws Exception {
         final KylinConfig config = KylinConfig.getInstanceFromEnv();
         JobEngineConfig engineConfig = new JobEngineConfig(KylinConfig.getInstanceFromEnv());
-        final CliCommandExecutor cmdExec = config.getCliCommandExecutor();
         final int uuidLength = 36;
-        final String preFix = "kylin_intermediate_";
+        final String preFix = MetadataConstants.KYLIN_INTERMEDIATE_PREFIX;
         final String uuidPattern = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
-        ISourceMetadataExplorer explr = SourceFactory.getDefaultSource().getSourceMetadataExplorer();
-        List<String> hiveTableNames = explr.listTables(config.getHiveDatabaseForIntermediateTable());
         Iterable<String> kylinIntermediates = Iterables.filter(hiveTableNames, new Predicate<String>() {
             @Override
             public boolean apply(@Nullable String input) {
-                return input != null && input.startsWith("kylin_intermediate_");
+                return input != null && input.startsWith(MetadataConstants.KYLIN_INTERMEDIATE_PREFIX);
             }
         });
 
@@ -293,9 +314,8 @@ public class StorageCleanupJob extends AbstractApplication {
                         String path = JobBuilderSupport.getJobWorkingDir(engineConfig.getHdfsWorkingDirectory(),
                                 segmentId2JobId.get(segmentId)) + "/" + tableToDelete;
                         Path externalDataPath = new Path(path);
-                        FileSystem fs = HadoopUtil.getWorkingFileSystem();
-                        if (fs.exists(externalDataPath)) {
-                            fs.delete(externalDataPath, true);
+                        if (defaultFs.exists(externalDataPath)) {
+                            defaultFs.delete(externalDataPath, true);
                             logger.info("Hive table {}'s external path {} deleted", tableToDelete, path);
                         } else {
                             logger.info(

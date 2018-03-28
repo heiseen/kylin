@@ -39,7 +39,7 @@ public class SQLRequest implements Serializable {
 
     private Map<String, String> backdoorToggles;
 
-    private volatile Object cacheKey = null;
+    protected volatile Object cacheKey = null;
 
     public SQLRequest() {
     }
@@ -104,7 +104,7 @@ public class SQLRequest implements Serializable {
         if (cacheKey != null)
             return cacheKey;
 
-        cacheKey = Lists.newArrayList(sql.replaceAll("\\s+", "") //
+        cacheKey = Lists.newArrayList(sql.replaceAll("[ ]", " ") //
                 , project //
                 , offset //
                 , limit //

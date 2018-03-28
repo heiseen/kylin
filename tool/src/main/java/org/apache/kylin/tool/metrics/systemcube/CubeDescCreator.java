@@ -18,15 +18,12 @@
 
 package org.apache.kylin.tool.metrics.systemcube;
 
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.Pair;
-import org.apache.kylin.cube.CubeDescManager;
 import org.apache.kylin.cube.model.AggregationGroup;
 import org.apache.kylin.cube.model.CubeDesc;
 import org.apache.kylin.cube.model.DimensionDesc;
@@ -50,26 +47,12 @@ import org.apache.kylin.metrics.property.JobPropertyEnum;
 import org.apache.kylin.metrics.property.QueryCubePropertyEnum;
 import org.apache.kylin.metrics.property.QueryPropertyEnum;
 import org.apache.kylin.metrics.property.QueryRPCPropertyEnum;
-import org.apache.kylin.tool.metrics.systemcube.util.HiveSinkTool;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 
 public class CubeDescCreator {
-
-    public static void main(String[] args) throws Exception {
-        //        KylinConfig.setSandboxEnvIfPossible();
-        KylinConfig config = KylinConfig.getInstanceFromEnv();
-
-        CubeDesc kylinCubeDesc = generateKylinCubeDescForMetricsQuery(config, new HiveSinkTool());
-        ByteArrayOutputStream buf = new ByteArrayOutputStream();
-        DataOutputStream dout = new DataOutputStream(buf);
-        CubeDescManager.CUBE_DESC_SERIALIZER.serialize(kylinCubeDesc, dout);
-        dout.close();
-        buf.close();
-        System.out.println(buf.toString());
-    }
 
     public static CubeDesc generateKylinCubeDescForMetricsQuery(KylinConfig config, SinkTool sinkTool) {
         String tableName = sinkTool.getTableNameForMetrics(config.getKylinMetricsSubjectQuery());
@@ -92,7 +75,7 @@ public class CubeDescCreator {
         List<Pair<String, String>> measureTypeList = HiveTableCreator.getHiveColumnsForMetricsQuery();
         Map<String, String> measureTypeMap = Maps.newHashMapWithExpectedSize(measureTypeList.size());
         for (Pair<String, String> entry : measureTypeList) {
-            measureTypeMap.put(entry.getKey(), entry.getValue());
+            measureTypeMap.put(entry.getFirst(), entry.getSecond());
         }
         measureDescList.add(getMeasureCount());
         measureDescList.add(getMeasureMin(QueryPropertyEnum.TIME_COST.toString(),
@@ -174,7 +157,7 @@ public class CubeDescCreator {
         List<Pair<String, String>> measureTypeList = HiveTableCreator.getHiveColumnsForMetricsQueryCube();
         Map<String, String> measureTypeMap = Maps.newHashMapWithExpectedSize(measureTypeList.size());
         for (Pair<String, String> entry : measureTypeList) {
-            measureTypeMap.put(entry.getKey(), entry.getValue());
+            measureTypeMap.put(entry.getFirst(), entry.getSecond());
         }
         measureDescList.add(getMeasureCount());
         for (String measure : measures) {
@@ -259,7 +242,7 @@ public class CubeDescCreator {
         List<Pair<String, String>> measureTypeList = HiveTableCreator.getHiveColumnsForMetricsQueryRPC();
         Map<String, String> measureTypeMap = Maps.newHashMapWithExpectedSize(measureTypeList.size());
         for (Pair<String, String> entry : measureTypeList) {
-            measureTypeMap.put(entry.getKey(), entry.getValue());
+            measureTypeMap.put(entry.getFirst(), entry.getSecond());
         }
         measureDescList.add(getMeasureCount());
         for (String measure : measures) {
@@ -336,7 +319,7 @@ public class CubeDescCreator {
         List<Pair<String, String>> measureTypeList = HiveTableCreator.getHiveColumnsForMetricsJob();
         Map<String, String> measureTypeMap = Maps.newHashMapWithExpectedSize(measureTypeList.size());
         for (Pair<String, String> entry : measureTypeList) {
-            measureTypeMap.put(entry.getKey(), entry.getValue());
+            measureTypeMap.put(entry.getFirst(), entry.getSecond());
         }
         measureDescList.add(getMeasureCount());
         for (String measure : measures) {

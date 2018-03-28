@@ -49,6 +49,7 @@ import org.apache.kylin.job.execution.DefaultChainedExecutable;
 import org.apache.kylin.job.execution.ExecutableContext;
 import org.apache.kylin.job.execution.ExecuteResult;
 import org.apache.kylin.metadata.TableMetadataManager;
+import org.apache.kylin.metadata.model.DataModelDesc;
 import org.apache.kylin.metadata.model.IJoinedFlatTableDesc;
 import org.apache.kylin.metadata.model.ISegment;
 import org.apache.kylin.metadata.model.JoinTableDesc;
@@ -176,7 +177,27 @@ public class HiveMRInput implements IMRInput {
         }
 
         protected String getJobWorkingDir(DefaultChainedExecutable jobFlow) {
-            return JobBuilderSupport.getJobWorkingDir(hdfsWorkingDir, jobFlow.getId());
+
+            String jobWorkingDir = JobBuilderSupport.getJobWorkingDir(hdfsWorkingDir, jobFlow.getId());
+            if (KylinConfig.getInstanceFromEnv().getHiveTableDirCreateFirst()) {
+                // Create work dir to avoid hive create it,
+                // the difference is that the owners are different.
+                checkAndCreateWorkDir(jobWorkingDir);
+            }
+            return jobWorkingDir;
+        }
+
+        private void checkAndCreateWorkDir(String jobWorkingDir) {
+            try {
+                Path path = new Path(jobWorkingDir);
+                FileSystem fileSystem = HadoopUtil.getFileSystem(path);
+                if (!fileSystem.exists(path)) {
+                    logger.info("Create jobWorkDir : " + jobWorkingDir);
+                    fileSystem.mkdirs(path);
+                }
+            } catch (IOException e) {
+                logger.error("Could not create lookUp table dir : " + jobWorkingDir);
+            }
         }
 
         private AbstractExecutable createRedistributeFlatHiveTableStep(String hiveInitStatements, String cubeName) {
@@ -201,7 +222,7 @@ public class HiveMRInput implements IMRInput {
             String prj = flatDesc.getDataModel().getProject();
             for (JoinTableDesc lookupDesc : flatDesc.getDataModel().getJoinTables()) {
                 TableDesc tableDesc = metadataManager.getTableDesc(lookupDesc.getTable(), prj);
-                if (tableDesc.isView()) {
+                if (lookupDesc.getKind() == DataModelDesc.TableKind.LOOKUP && tableDesc.isView()) {
                     lookupViewsTables.add(tableDesc);
                 }
             }
@@ -283,6 +304,12 @@ public class HiveMRInput implements IMRInput {
             return hiveClient.getHiveTableRows(database, table);
         }
 
+        private long getDataSize(String database, String table) throws Exception {
+            IHiveClient hiveClient = HiveClientFactory.getHiveClient();
+            long size = hiveClient.getHiveTableMeta(database, table).fileSize;
+            return size;
+        }
+
         private void redistributeTable(KylinConfig config, int numReducers) throws IOException {
             final HiveCmdBuilder hiveCmdBuilder = new HiveCmdBuilder();
             hiveCmdBuilder.overwriteHiveProps(config.getHiveConfigOverride());
@@ -348,6 +375,8 @@ public class HiveMRInput implements IMRInput {
                 stepLogger.log("num reducers for RedistributeFlatHiveTableStep = " + numReducers);
 
                 redistributeTable(config, numReducers);
+                long dataSize = getDataSize(database, tableName);
+                getManager().addJobInfo(getId(), ExecutableConstants.HDFS_BYTES_WRITTEN, "" + dataSize);
                 return new ExecuteResult(ExecuteResult.State.SUCCEED, stepLogger.getBufferedLog());
 
             } catch (Exception e) {

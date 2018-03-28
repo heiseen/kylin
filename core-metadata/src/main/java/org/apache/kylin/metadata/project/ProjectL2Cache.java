@@ -187,6 +187,10 @@ class ProjectL2Cache {
         return result;
     }
 
+    void reloadCacheByProject(String project) {
+        projectCaches.put(project, loadCache(project));
+    }
+
     private ProjectCache loadCache(String project) {
         logger.debug("Loading L2 project cache for " + project);
         ProjectCache projectCache = new ProjectCache(project);
@@ -263,7 +267,7 @@ class ProjectL2Cache {
                 return false;
             }
 
-            if (!col.getColumnDesc().isComputedColumnn()) {
+            if (!col.getColumnDesc().isComputedColumn()) {
                 ColumnDesc foundCol = table.findColumnByName(col.getName());
                 if (col.getColumnDesc().equals(foundCol) == false) {
                     logger.error("Realization '" + realization.getCanonicalName() + "' reports column '" + col.getCanonicalName() + "', but it is not equal to '" + foundCol + "' according to MetadataManager");

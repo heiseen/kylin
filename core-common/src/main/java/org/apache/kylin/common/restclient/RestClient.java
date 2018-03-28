@@ -38,6 +38,7 @@ import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpPut;
 import org.apache.http.client.methods.HttpRequestBase;
+import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.client.DefaultHttpClient;
@@ -61,8 +62,8 @@ public class RestClient {
 
     protected static Pattern fullRestPattern = Pattern.compile("(?:([^:]+)[:]([^@]+)[@])?([^:]+)(?:[:](\\d+))?");
 
-    private static final int HTTP_CONNECTION_TIMEOUT_MS = 30000;
-    private static final int HTTP_SOCKET_TIMEOUT_MS = 120000;
+    private int httpConnectionTimeoutMs = 30000;
+    private int httpSocketTimeoutMs = 120000;
 
     public static final String SCHEME_HTTP = "http://";
 
@@ -86,6 +87,10 @@ public class RestClient {
      * @param uri "user:pwd@host:port"
      */
     public RestClient(String uri) {
+        this(uri, null, null);
+    }
+
+    public RestClient(String uri, Integer httpConnectionTimeoutMs, Integer httpSocketTimeoutMs) {
         Matcher m = fullRestPattern.matcher(uri);
         if (!m.matches())
             throw new IllegalArgumentException("URI: " + uri + " -- does not match pattern " + fullRestPattern);
@@ -96,10 +101,25 @@ public class RestClient {
         String portStr = m.group(4);
         int port = Integer.parseInt(portStr == null ? "7070" : portStr);
 
+        if (httpConnectionTimeoutMs != null)
+            this.httpConnectionTimeoutMs = httpConnectionTimeoutMs;
+        if (httpSocketTimeoutMs != null)
+            this.httpSocketTimeoutMs = httpSocketTimeoutMs;
+
         init(host, port, user, pwd);
     }
 
     public RestClient(String host, int port, String userName, String password) {
+        this(host, port, userName, password, null, null);
+    }
+
+    public RestClient(String host, int port, String userName, String password, Integer httpConnectionTimeoutMs,
+            Integer httpSocketTimeoutMs) {
+        if (httpConnectionTimeoutMs != null)
+            this.httpConnectionTimeoutMs = httpConnectionTimeoutMs;
+        if (httpSocketTimeoutMs != null)
+            this.httpSocketTimeoutMs = httpSocketTimeoutMs;
+
         init(host, port, userName, password);
     }
 
@@ -111,8 +131,8 @@ public class RestClient {
         this.baseUrl = SCHEME_HTTP + host + ":" + port + KYLIN_API_PATH;
 
         final HttpParams httpParams = new BasicHttpParams();
-        HttpConnectionParams.setSoTimeout(httpParams, HTTP_SOCKET_TIMEOUT_MS);
-        HttpConnectionParams.setConnectionTimeout(httpParams, HTTP_CONNECTION_TIMEOUT_MS);
+        HttpConnectionParams.setSoTimeout(httpParams, httpSocketTimeoutMs);
+        HttpConnectionParams.setConnectionTimeout(httpParams, httpConnectionTimeoutMs);
 
         final PoolingClientConnectionManager cm = new PoolingClientConnectionManager();
         KylinConfig config = KylinConfig.getInstanceFromEnv();
@@ -130,8 +150,16 @@ public class RestClient {
     }
 
     public void wipeCache(String entity, String event, String cacheKey) throws IOException {
-        String url = baseUrl + "/cache/" + entity + "/" + cacheKey + "/" + event;
-        HttpPut request = new HttpPut(url);
+        HttpPut request;
+        String url;
+        if (cacheKey.contains("/")) {
+            url = baseUrl + "/cache/" + entity + "/" + event;
+            request = new HttpPut(url);
+            request.setEntity(new StringEntity(cacheKey, ContentType.create("application/json", "UTF-8")));
+        } else {
+            url = baseUrl + "/cache/" + entity + "/" + cacheKey + "/" + event;
+            request = new HttpPut(url);
+        }
 
         HttpResponse response = null;
         try {
@@ -253,6 +281,26 @@ public class RestClient {
         post.setEntity(new StringEntity(jsonMsg, "UTF-8"));
         HttpResponse response = client.execute(post);
         return response;
+    }
+
+    public void clearCacheForCubeMigration(String cube, String project, String model, Map<String, String> tableToProjects) throws IOException{
+        String url = baseUrl + "/cache/migration";
+        HttpPost post = new HttpPost(url);
+
+        post.addHeader("Accept", "application/json, text/plain, */*");
+        post.addHeader("Content-Type", "application/json");
+
+        HashMap<String, Object> paraMap = new HashMap<String, Object>();
+        paraMap.put("cube", cube);
+        paraMap.put("project", project);
+        paraMap.put("model", model);
+        paraMap.put("tableToProjects", tableToProjects);
+        String jsonMsg = JsonUtil.writeValueAsString(paraMap);
+        post.setEntity(new StringEntity(jsonMsg, "UTF-8"));
+        HttpResponse response = client.execute(post);
+        if (response.getStatusLine().getStatusCode() != 200) {
+            throw new IOException("Invalid response " + response.getStatusLine().getStatusCode());
+        }
     }
 
     private HashMap dealResponse(HttpResponse response) throws IOException {
